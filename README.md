@@ -56,6 +56,9 @@ CONFIG_ZMK_STATUS_ADV_CENTRAL_SIDE="LEFT"
 # CENTRAL_SIDE="AUX" only: which peripheral index is each keyboard half
 # CONFIG_ZMK_STATUS_ADV_LEFT_PERIPHERAL=0
 # CONFIG_ZMK_STATUS_ADV_RIGHT_PERIPHERAL=1
+# CENTRAL_SIDE="AUX" only: an AUX central has BOTH halves as peripherals,
+# so raise the expected count from its default of 1 (see Kconfig help):
+# CONFIG_PROSPECTOR_EXPECTED_PERIPHERAL_COUNT=2
 ```
 
 ### Compatibility

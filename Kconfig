@@ -166,6 +166,15 @@ config ZMK_STATUS_ADV_CENTRAL_SIDE
       own battery is shown in the Aux1 slot.
       This determines the battery display position in scanner devices.
 
+      IMPORTANT for AUX: an AUX central has at least 2 split peripherals
+      (both halves), but PROSPECTOR_EXPECTED_PERIPHERAL_COUNT defaults
+      to 1. Set it to your actual peripheral count (e.g. 2), otherwise
+      the burst/silent startup protection disengages after the first
+      half connects and the second half may connect slowly.
+      Also keep LEFT_PERIPHERAL, RIGHT_PERIPHERAL and AUX2_PERIPHERAL
+      set to three distinct indices - overlapping values display the
+      same peripheral twice and hide another.
+
 config ZMK_STATUS_ADV_LEFT_PERIPHERAL
     int "Peripheral index for LEFT half (CENTRAL_SIDE=AUX only)"
     default 0

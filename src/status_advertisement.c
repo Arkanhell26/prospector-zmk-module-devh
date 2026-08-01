@@ -917,6 +917,12 @@ static void adv_work_handler(struct k_work *work) {
 
     build_manufacturer_payload();
 
+    // Evaluate split connectivity once per handler run: the on-demand
+    // bt_conn_foreach walk is cheap but not free, and a single snapshot
+    // keeps the three decision points below mutually consistent even if a
+    // peripheral connects/disconnects mid-handler.
+    const bool split_ready = prospector_split_fully_connected();
+
     // ---- Burst/silent cycle gate (split central waiting for peripherals) ----
     //
     // While split is partial, enforce explicit time-multiplexing: yield the
@@ -924,7 +930,7 @@ static void adv_work_handler(struct k_work *work) {
     // CONNECT_REQ tx happen without collision. Adv only fires during the
     // BURST window. Net "scanner adv up-time" defaults to 10% (1s/10s).
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    if (!prospector_split_fully_connected()) {
+    if (!split_ready) {
         const uint32_t burst_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_BURST_MS;
         const uint32_t silent_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS;
         const uint32_t cycle_ms = burst_ms + silent_ms;
@@ -1021,7 +1027,7 @@ static void adv_work_handler(struct k_work *work) {
             // ZMK not advertising → start our own ADV
             zmk_adv_was_active = false;
 
-            if (!prospector_split_fully_connected()) {
+            if (!split_ready) {
                 // BURST phase of the burst/silent cycle (silent phase is
                 // handled at the top of adv_work_handler and short-circuits
                 // before reaching this code). Use fast adv interval so the
@@ -1085,7 +1091,7 @@ static void adv_work_handler(struct k_work *work) {
     // transition to SILENT on time. Without this, the idle 30s schedule
     // would let the burst run for 30s before the silent check fires.
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    if (!prospector_split_fully_connected()) {
+    if (!split_ready) {
         const uint32_t burst_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_BURST_MS;
         const uint32_t silent_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS;
         const uint32_t cycle_ms = burst_ms + silent_ms;
