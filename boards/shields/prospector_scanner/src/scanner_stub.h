@@ -10,6 +10,76 @@
 #include <zmk/status_scanner.h>
 #include <zmk/status_advertisement.h>
 
+#ifndef MAX_NAME_LEN
+#define MAX_NAME_LEN 32
+#endif
+
+/**
+ * @brief Data handed from the processing workqueue to the display thread
+ *
+ * SINGLE SOURCE OF TRUTH - do not redefine this struct in a .c file.
+ * Historically scanner_stub.c and custom_status_screen.c each carried
+ * their own copy and the two drifted apart (scanner_stub.c grew the
+ * kb_version fields): scanner_get_pending_update()'s bulk copy was sized
+ * by the larger definition and overwrote the caller's smaller stack
+ * variable - stack corruption on the display thread every update.
+ */
+struct pending_display_data {
+    volatile bool update_pending;
+    volatile bool signal_update_pending;  /* Signal widget updates separately (1Hz) */
+    volatile bool no_keyboards;           /* True when all keyboards timed out */
+
+    char device_name[MAX_NAME_LEN];
+    char layer_name[4];
+    int layer;
+    int wpm;
+    bool usb_ready;
+    bool ble_connected;
+    bool ble_bonded;
+    int profile;
+    uint8_t modifiers;
+    int bat[4];
+    int8_t rssi;
+    float rate_hz;
+    int scanner_battery;
+    bool scanner_battery_pending;
+
+    /* Keyboard firmware version (decoded from version + profile_slot fields) */
+    uint8_t kb_version_major;
+    uint8_t kb_version_minor;
+    uint8_t kb_version_patch;
+    bool kb_version_dev;
+    bool kb_version_valid;       /* True after first keyboard data received */
+};
+
+/**
+ * @brief Consume the pending display update, if any (display thread only)
+ *
+ * @param out Destination for a consistent snapshot (copied under mutex)
+ * @return true if an update was pending and copied
+ */
+bool scanner_get_pending_update(struct pending_display_data *out);
+
+/**
+ * @brief Consume the pending signal-widget update flag (display thread only)
+ */
+bool scanner_is_signal_pending(void);
+
+/**
+ * @brief Consume the pending scanner battery update, if any
+ */
+bool scanner_get_pending_battery(int *level);
+
+/**
+ * @brief Get last received keyboard firmware version
+ */
+bool scanner_get_kb_version(uint8_t *major, uint8_t *minor, uint8_t *patch,
+                            bool *is_dev, char *name, size_t name_len);
+
+/* Signal data written by the processing workqueue, read by display thread */
+extern volatile int8_t scanner_signal_rssi;
+extern volatile int32_t scanner_signal_rate_x100;  /* rate * 100 */
+
 /**
  * @brief Send keyboard data received from BLE advertisement
  *

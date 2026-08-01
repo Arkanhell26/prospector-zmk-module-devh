@@ -20,6 +20,8 @@
 #include <zmk/status_advertisement.h>
 #include <lvgl.h>
 
+#include "scanner_stub.h"  /* pending_display_data + own API declarations */
+
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
 #include <zmk/battery.h>
 #endif
@@ -38,7 +40,7 @@ extern int zmk_status_scanner_start(void);
 /* Uses struct zmk_keyboard_status from zmk/status_scanner.h as single source of truth */
 
 #define MAX_KEYBOARDS ZMK_STATUS_SCANNER_MAX_KEYBOARDS
-#define MAX_NAME_LEN 32
+/* MAX_NAME_LEN (32) comes from scanner_stub.h */
 
 static struct zmk_keyboard_status keyboards[MAX_KEYBOARDS];
 static int selected_keyboard = 0;
@@ -92,35 +94,8 @@ static bool incoming_pop(struct incoming_adv *out) {
     return true;
 }
 
-/* ========== Pending Display Data (set by LVGL timer, read by LVGL timer) ========== */
-
-struct pending_display_data {
-    volatile bool update_pending;
-    volatile bool signal_update_pending;  /* Signal widget updates separately (1Hz) */
-    volatile bool no_keyboards;           /* True when all keyboards timed out */
-
-    char device_name[MAX_NAME_LEN];
-    char layer_name[4];
-    int layer;
-    int wpm;
-    bool usb_ready;
-    bool ble_connected;
-    bool ble_bonded;
-    int profile;
-    uint8_t modifiers;
-    int bat[4];
-    int8_t rssi;
-    float rate_hz;
-    int scanner_battery;
-    bool scanner_battery_pending;
-
-    /* Keyboard firmware version (decoded from version + profile_slot fields) */
-    uint8_t kb_version_major;
-    uint8_t kb_version_minor;
-    uint8_t kb_version_patch;
-    bool kb_version_dev;
-    bool kb_version_valid;       /* True after first keyboard data received */
-};
+/* ========== Pending Display Data (written by workqueue, read by display thread) ========== */
+/* Struct definition lives in scanner_stub.h - the single source of truth. */
 
 static struct pending_display_data pending_data = {0};
 
@@ -177,7 +152,11 @@ bool scanner_get_kb_version(uint8_t *major, uint8_t *minor, uint8_t *patch,
     if (!mutex_initialized || !pending_data.kb_version_valid) {
         return false;
     }
-    if (k_mutex_lock(&data_mutex, K_MSEC(10)) != 0) {
+    /* Unlike the polled getters above, the only caller is one-shot (settings
+     * screen creation) and latches a false return as "KB: not connected"
+     * until the screen is reopened. Use a generous timeout - worst-case
+     * mutex hold by the workqueue is a full ring drain (a few ms). */
+    if (k_mutex_lock(&data_mutex, K_MSEC(100)) != 0) {
         return false;
     }
     bool valid = pending_data.kb_version_valid;
