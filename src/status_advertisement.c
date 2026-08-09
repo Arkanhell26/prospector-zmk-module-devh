@@ -462,6 +462,18 @@ static const struct bt_le_adv_param burst_adv_params = {
     .interval_max = BT_GAP_ADV_FAST_INT_MAX_2, // 150ms
 };
 
+// The PARTIAL_BURST/SILENT Kconfig symbols depend on ZMK_SPLIT_ROLE_CENTRAL,
+// so they don't exist on uni-body / peripheral builds. Provide fallback
+// values so the (dead, constant-folded) burst branch still compiles there:
+// prospector_split_fully_connected() is constant true on those builds, which
+// makes every use of these values unreachable. Fixes issue #24.
+#ifndef CONFIG_PROSPECTOR_SPLIT_PARTIAL_BURST_MS
+#define CONFIG_PROSPECTOR_SPLIT_PARTIAL_BURST_MS 200
+#endif
+#ifndef CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS
+#define CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS 1800
+#endif
+
 // Count of split-peripheral connections (we are CENTRAL on those), used to
 // decide between full prospector adv and the burst/silent cycle (see
 // adv_work_handler).
