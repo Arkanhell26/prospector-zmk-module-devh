@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: MIT
  *
  * Thread-Safe Brightness Control for Prospector v2.0
- * - Work Queue context: Sensor reading only, sends messages
- * - Main thread context: All PWM access happens in scanner_display.c
+ *
+ * This file only owns the APDS9960 I2C helpers and the auto-brightness
+ * enable flag. Both the sensor poll and the PWM write happen on the display
+ * thread (custom_status_screen.c) - never from a work queue.
  */
 
 #include <zephyr/kernel.h>
@@ -72,7 +74,6 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
 // Sensor state
 static const struct device *i2c_dev = NULL;
-static struct k_work_delayable brightness_sensor_work;
 static bool sensor_available = false;
 static bool auto_brightness_enabled = true;
 
@@ -212,29 +213,15 @@ uint8_t brightness_control_map_light_to_brightness(uint32_t light_value) {
     return min_brightness + (uint8_t)scaled_brightness;
 }
 
-// Work Queue handler - ONLY sends periodic sensor read request
-// CRITICAL: No I2C or PWM access here! Work Queue context!
-// All sensor reading happens in main thread via message handler
-static void brightness_sensor_work_handler(struct k_work *work) {
-    if (!sensor_available) {
-        goto reschedule;
-    }
-
-    // Send message to main thread to read sensor
-    // Main thread will do I2C access safely
-    scanner_msg_send_brightness_sensor_read();
-
-reschedule:
-    k_work_schedule(&brightness_sensor_work, K_MSEC(CONFIG_PROSPECTOR_ALS_UPDATE_INTERVAL_MS));
-}
-
 // API: Enable/disable auto brightness
+//
+// The sensor is polled by the display thread (see the auto-brightness timer
+// in custom_status_screen.c), which calls brightness_control_read_sensor()
+// and applies the result. This file only owns the I2C access helpers and the
+// enable flag - it must never touch I2C or PWM from a work queue.
 void brightness_control_set_auto(bool enabled) {
     auto_brightness_enabled = enabled;
-
-    if (enabled && sensor_available) {
-        // Trigger immediate sensor read
-        k_work_schedule(&brightness_sensor_work, K_NO_WAIT);
+    if (enabled) {
         LOG_INF("🔆 Auto brightness enabled");
     } else {
         LOG_INF("🔆 Auto brightness disabled");
@@ -247,7 +234,7 @@ bool brightness_control_is_auto(void) {
 }
 
 static int brightness_control_init(void) {
-    LOG_INF("🌞 Brightness Control: Message Queue Mode (Sensor)");
+    LOG_INF("🌞 Brightness Control: APDS9960 ambient light sensor");
 
     // Get I2C device (from device tree)
     i2c_dev = NULL;
@@ -271,18 +258,12 @@ static int brightness_control_init(void) {
 
     sensor_available = true;
 
-    LOG_INF("✅ Sensor brightness control ready (message queue mode)");
+    LOG_INF("✅ Sensor brightness control ready (polled by display thread)");
     LOG_INF("📊 Settings: Min=%u%%, Max=%u%%, Threshold=%u, Interval=%ums",
             CONFIG_PROSPECTOR_ALS_MIN_BRIGHTNESS,
             CONFIG_PROSPECTOR_ALS_MAX_BRIGHTNESS,
             CONFIG_PROSPECTOR_ALS_SENSOR_THRESHOLD,
             CONFIG_PROSPECTOR_ALS_UPDATE_INTERVAL_MS);
-
-    // Initialize work queue
-    k_work_init_delayable(&brightness_sensor_work, brightness_sensor_work_handler);
-
-    // Start sensor monitoring after 1 second
-    k_work_schedule(&brightness_sensor_work, K_MSEC(1000));
 
     return 0;
 }

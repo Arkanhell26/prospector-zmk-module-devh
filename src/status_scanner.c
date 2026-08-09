@@ -7,10 +7,10 @@
  *
  * Architecture:
  *   BT RX thread → scan_callback() → parse ADV → scanner_msg_send_keyboard_data()
- *   LVGL timer   → scanner_process_incoming() (in scanner_stub.c) → keyboards[] → widget
+ *   LVGL timer   → scanner_process_incoming() (in scanner_core.c) → keyboards[] → widget
  *
  * This file does NOT touch keyboards[] or any display state.
- * All keyboard state management is in scanner_stub.c (LVGL timer context only).
+ * All keyboard state management is in scanner_core.c (LVGL timer context only).
  */
 
 #include <zephyr/kernel.h>
@@ -25,7 +25,7 @@
 #include <zmk/status_advertisement.h>
 
 // Scanner stub functions for lock-free ring buffer push
-#include "../boards/shields/prospector_scanner/src/scanner_stub.h"
+#include <zmk/scanner_core.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -193,7 +193,7 @@ static void scan_callback(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 }
 
 /* ========== Public API ========== */
-/* All keyboard state queries delegate to scanner_stub.c (single source of truth) */
+/* All keyboard state queries delegate to scanner_core.c (single source of truth) */
 
 int zmk_status_scanner_init(void) {
     LOG_INF("Status scanner initialized (lock-free architecture)");
@@ -242,7 +242,7 @@ int zmk_status_scanner_stop(void) {
 
 int zmk_status_scanner_register_callback(zmk_status_scanner_callback_t callback) {
     /* No-op: callbacks removed in lock-free architecture.
-     * Display updates via pending_data in scanner_stub.c. */
+     * Display updates via pending_data in scanner_core.c. */
     ARG_UNUSED(callback);
     return 0;
 }
@@ -256,7 +256,7 @@ int zmk_status_scanner_get_active_count(void) {
 }
 
 int zmk_status_scanner_get_primary_keyboard(void) {
-    /* Find most recently seen keyboard in scanner_stub.c's keyboards[] */
+    /* Find most recently seen keyboard in scanner_core.c's keyboards[] */
     int primary = -1;
     uint32_t latest_seen = 0;
     struct zmk_keyboard_status kbd;

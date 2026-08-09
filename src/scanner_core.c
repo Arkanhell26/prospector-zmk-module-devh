@@ -1,15 +1,20 @@
 /**
- * Scanner Message Handler - Connects BLE scanner to display widgets
+ * Scanner Core - keyboard state tracking shared by every scanner shield
  *
  * Architecture (ring buffer + work handler, matching v2.1.0 timing):
  *   BT RX thread → ring buffer push (non-blocking, no mutex)
  *   Work handler (100ms) → scanner_process_incoming() → drain ring buffer
  *                         → manage keyboards[] → set pending_data
- *   LVGL timer (100ms)   → read pending_data → widget update (display only)
+ *   Display thread       → read pending_data → widget update (display only)
  *
  * Key design: Data processing (work handler) is separated from display
- * rendering (LVGL timer), matching v2.1.0's proven architecture.
- * The ring buffer eliminates mutex on the BT RX hot path.
+ * rendering, matching v2.1.0's proven architecture. The ring buffer
+ * eliminates mutex on the BT RX hot path.
+ *
+ * This file contains NO display code and must stay shield-agnostic: it is
+ * built for every scanner shield (prospector_scanner, scanner_pocket, ...).
+ * Anything that touches LVGL, a panel, or a specific input device belongs
+ * in the shield, not here.
  */
 
 #include <zephyr/kernel.h>
@@ -18,9 +23,8 @@
 #include <zephyr/sys/atomic.h>
 #include <zmk/status_scanner.h>
 #include <zmk/status_advertisement.h>
-#include <lvgl.h>
 
-#include "scanner_stub.h"  /* pending_display_data + own API declarations */
+#include <zmk/scanner_core.h>  /* pending_display_data + own API declarations */
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
 #include <zmk/battery.h>
@@ -40,7 +44,7 @@ extern int zmk_status_scanner_start(void);
 /* Uses struct zmk_keyboard_status from zmk/status_scanner.h as single source of truth */
 
 #define MAX_KEYBOARDS ZMK_STATUS_SCANNER_MAX_KEYBOARDS
-/* MAX_NAME_LEN (32) comes from scanner_stub.h */
+/* MAX_NAME_LEN (32) comes from zmk/scanner_core.h */
 
 static struct zmk_keyboard_status keyboards[MAX_KEYBOARDS];
 static int selected_keyboard = 0;
@@ -95,7 +99,7 @@ static bool incoming_pop(struct incoming_adv *out) {
 }
 
 /* ========== Pending Display Data (written by workqueue, read by display thread) ========== */
-/* Struct definition lives in scanner_stub.h - the single source of truth. */
+/* Struct definition lives in zmk/scanner_core.h - the single source of truth. */
 
 static struct pending_display_data pending_data = {0};
 
@@ -644,26 +648,6 @@ int scanner_msg_send_keyboard_data(const struct zmk_status_adv_data *adv_data,
     return 0;
 }
 
-int scanner_msg_send_swipe(int direction) {
-    LOG_DBG("Swipe gesture: direction=%d", direction);
-    return 0;
-}
-
-int scanner_msg_send_tap(int16_t x, int16_t y) {
-    LOG_DBG("Tap: x=%d, y=%d", x, y);
-    return 0;
-}
-
-int scanner_msg_send_battery_update(void) {
-    /* Scanner battery is now handled by scanner_process_incoming() */
-    return 0;
-}
-
-int scanner_msg_send_timeout_check(void) {
-    /* Timeouts are now handled by scanner_process_incoming() */
-    return 0;
-}
-
 int scanner_msg_send_display_refresh(void) {
     /* Called from LVGL timer context (swipe handler) when returning to MAIN screen.
      * Fill pending_data directly from current keyboard state. */
@@ -679,26 +663,6 @@ int scanner_msg_send_display_refresh(void) {
     }
 
     k_mutex_unlock(&data_mutex);
-    return 0;
-}
-
-int scanner_msg_send_timeout_wake(void) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_sensor_read(void) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_set_target(uint8_t target_brightness) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_fade_step(void) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_set_auto(bool enabled) {
     return 0;
 }
 

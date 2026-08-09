@@ -15,8 +15,8 @@ if(CONFIG_SHIELD_PROSPECTOR_SCANNER)
     # Touch handler (when touch is enabled)
     target_sources_ifdef(CONFIG_PROSPECTOR_TOUCH_ENABLED app PRIVATE src/touch_handler.c)
 
-    # Scanner stub for message handling (required by custom_status_screen.c)
-    target_sources_ifdef(CONFIG_PROSPECTOR_MODE_SCANNER app PRIVATE src/scanner_stub.c)
+    # Keyboard state tracking lives in the module (src/scanner_core.c) so that
+    # every scanner shield shares it - nothing shield-local to add here.
 
     # Display settings persistence (NVS)
     target_sources_ifdef(CONFIG_ZMK_DISPLAY_STATUS_SCREEN_CUSTOM app PRIVATE src/display_settings.c)

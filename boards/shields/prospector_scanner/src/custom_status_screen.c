@@ -39,12 +39,12 @@
 
 LOG_MODULE_REGISTER(display_screen, LOG_LEVEL_INF);
 
-/* ========== Pending Display Data from scanner_stub.c ========== */
+/* ========== Pending Display Data from scanner_core.c ========== */
 /* Work queue sets data + flag, LVGL timer here processes it on the display
  * thread. struct pending_display_data + getter declarations come from
- * scanner_stub.h - NEVER redefine them locally (a drifted local copy once
+ * zmk/scanner_core.h - NEVER redefine them locally (a drifted local copy once
  * caused an 8-byte stack overwrite in scanner_get_pending_update). */
-#include "scanner_stub.h"
+#include <zmk/scanner_core.h>
 
 /* LVGL timer for processing pending updates in main thread */
 static lv_timer_t *pending_update_timer = NULL;
@@ -493,7 +493,7 @@ static void pending_update_timer_cb(lv_timer_t *timer) {
         LOG_INF("Display heartbeat #%u (screen=%d)", heartbeat_counter / 300, current_screen);
     }
 
-    /* Ring buffer is drained by process_work in scanner_stub.c (work queue context).
+    /* Ring buffer is drained by process_work in scanner_core.c (work queue context).
      * LVGL timer only handles display updates from pending_data. */
 
     /* Skip display updates during screen transitions (defensive guard) */
@@ -933,7 +933,7 @@ lv_obj_t *zmk_display_status_screen(void) {
     return screen;
 }
 
-/* ========== Widget Update Functions (called from scanner_stub.c) ========== */
+/* ========== Widget Update Functions (called from scanner_core.c) ========== */
 
 void display_update_device_name(const char *name) {
     if (name) {
@@ -2739,7 +2739,7 @@ static void create_system_settings_widgets(void) {
 
 /* ========== Keyboard Select Screen Functions ========== */
 
-/* External functions from scanner_stub.c */
+/* External functions from scanner_core.c */
 extern int scanner_get_selected_keyboard(void);
 extern void scanner_set_selected_keyboard(int index);
 
@@ -2772,7 +2772,7 @@ static void ks_entry_click_cb(lv_event_t *e) {
 
     ks_selected_keyboard = keyboard_index;
 
-    /* Update scanner_stub.c to display this keyboard on main screen */
+    /* Update scanner_core.c to display this keyboard on main screen */
     scanner_set_selected_keyboard(keyboard_index);
 
     /* Update visual state for all entries */
@@ -3277,7 +3277,7 @@ static void destroy_keyboard_select_widgets(void) {
 static void create_keyboard_select_widgets(void) {
     LOG_INF("Creating keyboard select widgets...");
 
-    /* Get current selection from scanner_stub.c */
+    /* Get current selection from scanner_core.c */
     ks_selected_keyboard = scanner_get_selected_keyboard();
     LOG_INF("Current selected keyboard: %d", ks_selected_keyboard);
 
