@@ -307,15 +307,24 @@ static void fill_pending_from_selected(void) {
     pending_data.update_pending = true;
 }
 
-void scanner_set_selected_keyboard(int index) {
-    if (index >= 0 && index < MAX_KEYBOARDS) {
-        if (mutex_initialized && k_mutex_lock(&data_mutex, K_MSEC(10)) == 0) {
-            selected_keyboard = index;
-            LOG_INF("Selected keyboard changed to slot %d", index);
-            fill_pending_from_selected();
-            k_mutex_unlock(&data_mutex);
-        }
+int scanner_set_selected_keyboard(int index) {
+    if (index < 0 || index >= MAX_KEYBOARDS) {
+        return -EINVAL;
     }
+    if (!mutex_initialized) {
+        return -EAGAIN;
+    }
+    /* User-driven, cold path (tap on the keyboard list): wait longer than
+     * the polled getters so a busy workqueue drain doesn't silently drop
+     * the selection and leave the UI highlight out of sync with the core. */
+    if (k_mutex_lock(&data_mutex, K_MSEC(100)) != 0) {
+        LOG_WRN("Could not select keyboard %d: core busy", index);
+        return -EBUSY;
+    }
+    selected_keyboard = index;
+    fill_pending_from_selected();
+    k_mutex_unlock(&data_mutex);
+    return 0;
 }
 
 /* ========== Periodic Process Work (drains ring buffer, updates keyboards[]) ========== */
@@ -436,6 +445,18 @@ void scanner_process_incoming(void) {
             }
         } else if (index == selected_keyboard && !keyboards[index].active) {
             /* New keyboard appearing in selected slot = high priority */
+            high_priority_change = true;
+        } else if (selected_keyboard < 0 || selected_keyboard >= MAX_KEYBOARDS ||
+                   !keyboards[selected_keyboard].active) {
+            /* The selected slot is dead (e.g. every keyboard timed out and
+             * this one came back into a different, lower free slot) and
+             * nothing else re-arms the selection in that case: the 1Hz
+             * push and the timeout re-arm both key off the selected slot.
+             * Without this the display stays on "Scanning..." forever
+             * while adverts flow normally. Adopt the arriving keyboard. */
+            LOG_INF("Selected slot %d inactive - adopting keyboard in slot %d",
+                    selected_keyboard, index);
+            selected_keyboard = index;
             high_priority_change = true;
         }
 

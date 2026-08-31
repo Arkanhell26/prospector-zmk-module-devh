@@ -169,7 +169,7 @@ int scanner_get_selected_keyboard(void);
  *
  * @param index Keyboard index to select
  */
-void scanner_set_selected_keyboard(int index);
+int scanner_set_selected_keyboard(int index); /* 0 on success, -EBUSY if the core was busy */
 
 /**
  * @brief Send display refresh request

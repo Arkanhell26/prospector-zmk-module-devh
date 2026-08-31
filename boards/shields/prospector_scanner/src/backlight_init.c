@@ -23,30 +23,12 @@ static const struct device *backlight_dev = DEVICE_DT_GET(BACKLIGHT_NODE);
 #define HAS_PWM_BACKLIGHT 0
 #endif
 
-static uint32_t heartbeat_count = 0;
-
 /* Default brightness (0-100) */
 #define DEFAULT_BRIGHTNESS 65
 
-/* Heartbeat timer callback - for debugging */
-static void heartbeat_timer_cb(struct k_timer *timer) {
-    heartbeat_count++;
-    LOG_INF("Heartbeat #%u - device alive", heartbeat_count);
-
-    /* Check display status every 5 heartbeats */
-    if (heartbeat_count % 5 == 0) {
-        const struct device *display = DEVICE_DT_GET_OR_NULL(DT_CHOSEN(zephyr_display));
-        if (display && device_is_ready(display)) {
-            struct display_capabilities caps;
-            display_get_capabilities(display, &caps);
-            LOG_INF("Display: %ux%u, format=%d", caps.x_resolution, caps.y_resolution, caps.current_pixel_format);
-        } else {
-            LOG_WRN("Display not ready");
-        }
-    }
-}
-
-K_TIMER_DEFINE(heartbeat_timer, heartbeat_timer_cb, NULL);
+/* The old 3s k_timer "heartbeat" was removed: it called
+ * display_get_capabilities() from ISR context every 15s and logged 1200
+ * records/hour. Liveness is now covered by fault_recovery.c. */
 
 #if HAS_PWM_BACKLIGHT
 
@@ -68,10 +50,6 @@ static int backlight_init(void) {
     }
 
     LOG_INF("Backlight turned ON at %d%% brightness", DEFAULT_BRIGHTNESS);
-
-    /* Start heartbeat timer - every 3 seconds */
-    k_timer_start(&heartbeat_timer, K_SECONDS(3), K_SECONDS(3));
-    LOG_INF("Heartbeat timer started (3s interval)");
 
     return 0;
 }

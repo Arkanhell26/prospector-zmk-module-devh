@@ -330,6 +330,9 @@ static void lines_update(void) {
     float speed = ANIM_BASE_SPEED +
                   clampf((float)current_wpm / WPM_REFERENCE, 0, 1) * ANIM_WPM_SPEED_MULTIPLIER;
     lines_time += speed * (1.0f / 30.0f) * 60.0f;
+    /* Keep the float accumulator bounded (multiple of 2*pi) - otherwise the
+     * increment underflows after days of typing and the animation stops. */
+    if (lines_time > 6283.185f) lines_time -= 6283.185f;
 
     /* Advance idle wobble (always runs) */
     idle_wobble_time += 0.02f;

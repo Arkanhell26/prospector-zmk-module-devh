@@ -75,6 +75,24 @@ static lv_timer_t *swipe_process_timer = NULL;
 /* Auto brightness timer - reads sensor and adjusts brightness when auto mode enabled */
 static lv_timer_t *auto_brightness_timer = NULL;
 #define AUTO_BRIGHTNESS_INTERVAL_MS 1000  /* Check sensor every 1 second */
+static void auto_brightness_timer_cb(lv_timer_t *timer);
+static bool ds_auto_brightness_enabled = false;
+
+/* Create the 1s sensor-poll timer (display thread only). Shared by the
+ * settings switch and boot-time restore of a persisted "auto" setting -
+ * previously only the switch created it, so auto brightness silently did
+ * nothing after every reboot until the user toggled the switch. */
+static void start_auto_brightness_timer(void) {
+    if (!ds_auto_brightness_enabled || !brightness_control_sensor_available()) {
+        return;
+    }
+    if (!auto_brightness_timer) {
+        auto_brightness_timer = lv_timer_create(auto_brightness_timer_cb, AUTO_BRIGHTNESS_INTERVAL_MS, NULL);
+        LOG_INF("Auto brightness timer started (%d ms interval)", AUTO_BRIGHTNESS_INTERVAL_MS);
+    }
+    /* Trigger immediate sensor read */
+    auto_brightness_timer_cb(NULL);
+}
 
 /* Forward declarations */
 static void destroy_main_screen_widgets(void);
@@ -271,7 +289,7 @@ static lv_obj_t *ds_slide_switch = NULL;
 static lv_obj_t *ds_nav_hint = NULL;
 
 /* Display Settings State (persists across screen transitions, backed by NVS) */
-static bool ds_auto_brightness_enabled = false;
+/* ds_auto_brightness_enabled is declared near AUTO_BRIGHTNESS_INTERVAL_MS */
 static uint8_t ds_manual_brightness = 65;
 /* Battery visible if CONFIG_PROSPECTOR_BATTERY_SUPPORT=y in config */
 static bool ds_battery_visible = IS_ENABLED(CONFIG_PROSPECTOR_BATTERY_SUPPORT);
@@ -294,6 +312,7 @@ static void load_display_settings(void) {
     /* Apply saved brightness setting */
     if (ds_auto_brightness_enabled) {
         brightness_control_set_auto(true);
+        start_auto_brightness_timer();
     } else {
         set_pwm_brightness(ds_manual_brightness);
     }
@@ -1003,12 +1022,21 @@ static void layer_pos_x_anim_cb(void *var, int32_t value) {
     lv_obj_set_x((lv_obj_t *)var, value);
 }
 
-/* Animation callback for pulse scale effect */
+/* Animation callback for pulse highlight effect.
+ *
+ * Deliberately NOT a transform (scale/rotate). With LV_USE_MATRIX off,
+ * any transformed object forces LVGL to render it through a separate
+ * layer whose buffer (4-7KB, contiguous) comes from the 32/64KB LVGL
+ * pool on EVERY frame. Once the pool is fragmented that allocation fails
+ * and, with LV_USE_OS=0, lv_refr's draw_buf_flush() spins forever in
+ * lv_draw_dispatch_wait_for_request() - the display thread never returns
+ * and the last frame stays on the LCD. A text-opacity pulse is drawn
+ * in-place with no layer, so this failure mode cannot occur. */
 static void layer_pulse_anim_cb(void *var, int32_t value) {
-    /* value goes 100 -> 130 -> 100 (percentage) */
+    /* value goes 0 -> 100 -> 0: dip the text to ~50% and back */
     lv_obj_t *label = (lv_obj_t *)var;
-    int32_t scale = (value * 256) / 100;  /* Convert to LVGL scale (256 = 100%) */
-    lv_obj_set_style_transform_scale(label, scale, 0);
+    lv_opa_t opa = (lv_opa_t)(LV_OPA_COVER - (value * 128) / 100);
+    lv_obj_set_style_text_opa(label, opa, 0);
 }
 
 /* Helper to create layer list widgets */
@@ -1119,7 +1147,7 @@ static void start_pulse_anim(lv_obj_t *obj) {
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, obj);
     lv_anim_set_exec_cb(&anim, layer_pulse_anim_cb);
-    lv_anim_set_values(&anim, 100, 125);  /* Scale 100% -> 125% */
+    lv_anim_set_values(&anim, 0, 100);  /* opacity dip 0% -> 100% of effect */
     lv_anim_set_time(&anim, 100);  /* 100ms expand */
     lv_anim_set_playback_time(&anim, 100);  /* 100ms shrink back */
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
@@ -2088,6 +2116,18 @@ static void create_main_screen_widgets(void) {
 static void ds_custom_slider_drag_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *slider = lv_event_get_target(e);
+
+    /* LVGL delivers INDEV_RESET (pressed object deleted / indev reset)
+     * or PRESS_LOST instead of RELEASED in some paths. Without handling
+     * them ui_interaction_active would stay true forever, which makes
+     * every later swipe and list update return early - a permanent UI
+     * lockup. Treat both as a cancelled drag. */
+    if (code == LV_EVENT_INDEV_RESET || code == LV_EVENT_PRESS_LOST) {
+        slider_drag_state.active_slider = NULL;
+        slider_drag_state.drag_cancelled = false;
+        ui_interaction_active = false;
+        return;
+    }
     lv_indev_t *indev = lv_indev_active();
     if (!indev) return;
 
@@ -2229,12 +2269,7 @@ static void ds_auto_switch_event_cb(lv_event_t *e) {
 
     /* Start/stop auto brightness timer */
     if (checked && brightness_control_sensor_available()) {
-        if (!auto_brightness_timer) {
-            auto_brightness_timer = lv_timer_create(auto_brightness_timer_cb, AUTO_BRIGHTNESS_INTERVAL_MS, NULL);
-            LOG_INF("Auto brightness timer started (%d ms interval)", AUTO_BRIGHTNESS_INTERVAL_MS);
-        }
-        /* Trigger immediate sensor read */
-        auto_brightness_timer_cb(NULL);
+        start_auto_brightness_timer();
     } else if (auto_brightness_timer) {
         lv_timer_del(auto_brightness_timer);
         auto_brightness_timer = NULL;
@@ -2498,6 +2533,8 @@ static void create_display_settings_widgets(void) {
     lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_INDEV_RESET, NULL);
 
     /* Brightness value label */
     ds_brightness_value = lv_label_create(screen_obj);
@@ -2606,6 +2643,8 @@ static void create_display_settings_widgets(void) {
     lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_INDEV_RESET, NULL);
 
     /* Layer value label (aligned with Brightness value at x=230) */
     ds_layer_value = lv_label_create(screen_obj);
@@ -2746,7 +2785,7 @@ static void create_system_settings_widgets(void) {
 
 /* External functions from scanner_core.c */
 extern int scanner_get_selected_keyboard(void);
-extern void scanner_set_selected_keyboard(int index);
+extern int scanner_set_selected_keyboard(int index);
 
 /* RSSI helper functions (same as original keyboard_list_widget.c) */
 static uint8_t ks_rssi_to_bars(int8_t rssi) {
@@ -2778,7 +2817,13 @@ static void ks_entry_click_cb(lv_event_t *e) {
     ks_selected_keyboard = keyboard_index;
 
     /* Update scanner_core.c to display this keyboard on main screen */
-    scanner_set_selected_keyboard(keyboard_index);
+    if (scanner_set_selected_keyboard(keyboard_index) != 0) {
+        /* Core was busy: keep UI and core consistent by not pretending
+         * the selection changed. The user simply taps again. */
+        LOG_WRN("Keyboard %d selection not applied (core busy) - tap again", keyboard_index);
+        ks_selected_keyboard = -1;
+        return;
+    }
 
     /* Update visual state for all entries */
     for (int i = 0; i < ks_entry_count; i++) {

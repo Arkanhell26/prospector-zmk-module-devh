@@ -122,7 +122,12 @@ void k_sys_fatal_error_handler(unsigned int reason, const struct arch_esf *esf) 
  */
 #if IS_ENABLED(CONFIG_PROSPECTOR_SCANNER_TASK_WATCHDOG)
 
-#define WATCHDOG_PERIOD_MS 10000
+/* 30s: comfortably above every legitimate stall on either fed path (NVS
+ * settings save on the display thread during a screen transition, a 500ms
+ * I2C timeout on the light sensor, touch-event floods that back up the
+ * shared system workqueue) while still recovering a wedged device long
+ * before anyone reaches for the power switch. */
+#define WATCHDOG_PERIOD_MS 30000
 
 static int wdt_display_channel = -1;
 static int wdt_core_channel = -1;
