@@ -10,6 +10,14 @@
 #include <zmk/status_scanner.h>
 #include <zmk/status_advertisement.h>
 
+/**
+ * @brief Liveness hook called at the start of every process_work run
+ *
+ * Weak no-op in the core. A shield may provide a strong definition to feed
+ * a watchdog channel from the system-workqueue processing path.
+ */
+void scanner_core_process_alive(void);
+
 #ifndef MAX_NAME_LEN
 #define MAX_NAME_LEN 32
 #endif

@@ -36,6 +36,7 @@
 #include "brightness_control.h"  /* For auto brightness sensor control */
 #include "display_settings.h"   /* NVS persistence for display settings */
 #include "prospector_layouts.h"  /* Carrefinho-inspired display layouts */
+#include "fault_recovery.h"      /* Crash recovery + display watchdog feed */
 
 LOG_MODULE_REGISTER(display_screen, LOG_LEVEL_INF);
 
@@ -486,6 +487,10 @@ static char last_keyboard_name[MAX_NAME_LEN] = "";  /* Track keyboard changes */
 
 static void pending_update_timer_cb(lv_timer_t *timer) {
     ARG_UNUSED(timer);
+
+    /* Watchdog feed FIRST - before any early return below. This timer is
+     * the proof that the display thread is still ticking. */
+    fault_recovery_display_alive();
 
     /* Heartbeat: log every 30 seconds to detect display thread hangs */
     static uint32_t heartbeat_counter = 0;

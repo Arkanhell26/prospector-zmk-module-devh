@@ -596,9 +596,14 @@ void scanner_process_incoming(void) {
 
 /* ========== Process Work Handler ========== */
 
+__weak void scanner_core_process_alive(void) {
+    /* Default: nothing. Shields override to feed a watchdog. */
+}
+
 static void process_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
     process_pending = false;
+    scanner_core_process_alive();
 
     if (mutex_initialized && k_mutex_lock(&data_mutex, K_MSEC(50)) == 0) {
         scanner_process_incoming();

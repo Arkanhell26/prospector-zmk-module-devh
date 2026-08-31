@@ -5,6 +5,10 @@ if(CONFIG_SHIELD_PROSPECTOR_SCANNER)
     # Backlight initialization (always needed)
     target_sources(app PRIVATE src/backlight_init.c)
 
+    # Crash recovery: turn fatal errors into a logged reboot instead of a
+    # silent halt that looks like a display freeze
+    target_sources(app PRIVATE src/fault_recovery.c)
+
     # CUSTOM screen support (from display_test)
     target_sources_ifdef(CONFIG_ZMK_DISPLAY_STATUS_SCREEN_CUSTOM app PRIVATE src/custom_status_screen.c)
     target_sources_ifdef(CONFIG_ZMK_DISPLAY_STATUS_SCREEN_CUSTOM app PRIVATE src/hello_widget.c)
