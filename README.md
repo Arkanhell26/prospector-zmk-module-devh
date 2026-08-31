@@ -33,6 +33,13 @@ Add to your keyboard's `.conf` file:
 CONFIG_ZMK_STATUS_ADVERTISEMENT=y
 CONFIG_ZMK_STATUS_ADV_KEYBOARD_NAME="MyKeyboard"
 
+# Split keyboards: only the CENTRAL build broadcasts status (it is the
+# side that knows the layer, active profile and the other half's battery),
+# so make sure these settings are in effect for whichever build is your
+# central. If you use a dongle, the dongle IS the central - put them in
+# its config. A peripheral build with them enabled just stays silent, so
+# a single .conf shared by both halves is fine.
+
 # Optional: Channel pairing (0=broadcast to all scanners)
 CONFIG_PROSPECTOR_CHANNEL=0
 
