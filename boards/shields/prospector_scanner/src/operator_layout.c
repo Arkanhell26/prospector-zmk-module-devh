@@ -1193,7 +1193,27 @@ void operator_layout_update(uint8_t active_layer, const char *layer_name,
         /* Check if mode needs switching */
         int bat_count = count_active_batteries(battery_level, battery_connected,
                                                peripheral_battery, peripheral_connected);
-        ensure_battery_mode(layout_container, bat_count);
+        /* ensure_battery_mode() destroys and rebuilds the whole container
+         * whenever the count changes. A peripheral whose battery byte flaps
+         * 0 <-> N (reconnect, charging) would rebuild it on every advert -
+         * ~10 object churns/s into the LVGL pool, a fragmentation engine.
+         * Grow immediately, but only SHRINK once the lower count has held
+         * for a while. */
+        static int pending_shrink_count = -1;
+        static uint32_t pending_shrink_since;
+        if (battery_widgets.container == NULL || bat_count >= battery_widgets.battery_count) {
+            pending_shrink_count = -1;
+            ensure_battery_mode(layout_container, bat_count);
+        } else {
+            uint32_t now = k_uptime_get_32();
+            if (bat_count != pending_shrink_count) {
+                pending_shrink_count = bat_count;
+                pending_shrink_since = now;
+            } else if ((now - pending_shrink_since) >= 3000) {
+                pending_shrink_count = -1;
+                ensure_battery_mode(layout_container, bat_count);
+            }
+        }
 
         if (battery_widgets.mode == BATTERY_MODE_BARS) {
             update_battery_bars(battery_level, battery_connected,

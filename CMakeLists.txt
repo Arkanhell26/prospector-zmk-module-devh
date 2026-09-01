@@ -10,9 +10,12 @@ if(CONFIG_ZMK_STATUS_ADVERTISEMENT)
         target_sources(app PRIVATE src/status_advertisement.c)
 endif()
 
-# Add scanner mode support
+# Add scanner mode support.
+# status_scanner.c = BLE receive layer, scanner_core.c = keyboard state.
+# Both are shield-agnostic and shared by every scanner shield.
 if(CONFIG_PROSPECTOR_MODE_SCANNER)
         target_sources(app PRIVATE src/status_scanner.c)
+        target_sources(app PRIVATE src/scanner_core.c)
 
         # Get git describe for scanner version display
         execute_process(

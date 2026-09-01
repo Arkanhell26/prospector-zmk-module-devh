@@ -474,29 +474,45 @@ static const struct bt_le_adv_param burst_adv_params = {
 #define CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS 1800
 #endif
 
-// Track number of split-peripheral connections (we are CENTRAL on those).
-// Used to decide between full prospector adv and low-impact adv (see
-// adv_work_handler). Pre-init the counter at 0; post-boot, the central's
-// connected/disconnected callbacks keep it in sync.
-static atomic_t split_peripheral_count = ATOMIC_INIT(0);
+// Count of split-peripheral connections (we are CENTRAL on those), used to
+// decide between full prospector adv and the burst/silent cycle (see
+// adv_work_handler).
+//
+// Computed on demand from the connection table instead of a
+// callback-maintained counter: bt_conn_cb_register() only delivers events
+// for connections established AFTER registration, so a counter seeded at 0
+// misses peripherals that connected before prospector init (SYS_INIT prio 95
+// runs after the split central starts scanning) and the burst/silent cycle
+// stays locked on forever (issue #22). Walking the table gives ground truth
+// on every evaluation, with no seeding race and no drift.
+#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
+static void count_split_peripheral_conn(struct bt_conn *conn, void *user_data) {
+    int *count = user_data;
+    struct bt_conn_info info;
+    if (bt_conn_get_info(conn, &info) < 0) return;
+    if (info.state != BT_CONN_STATE_CONNECTED) return; // skip connecting/disconnecting
+    if (info.role != BT_CONN_ROLE_CENTRAL) return;     // host-side conn, not split
+    (*count)++;
+}
+#endif
 
 static inline bool prospector_split_fully_connected(void) {
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    return atomic_get(&split_peripheral_count) >=
-           CONFIG_PROSPECTOR_EXPECTED_PERIPHERAL_COUNT;
+    int count = 0;
+    bt_conn_foreach(BT_CONN_TYPE_LE, count_split_peripheral_conn, &count);
+    return count >= CONFIG_PROSPECTOR_EXPECTED_PERIPHERAL_COUNT;
 #else
     return true; // not split central → no peripherals to wait for
 #endif
 }
 
-// --- Connect callback: count split peripherals and refresh adv params ---
+// --- Connect callback: refresh adv params when a split peripheral connects ---
 static void prospector_ble_connected(struct bt_conn *conn, uint8_t err) {
     if (err) return;
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
     struct bt_conn_info info;
     if (bt_conn_get_info(conn, &info) < 0) return;
     if (info.role != BT_CONN_ROLE_CENTRAL) return; // host-side conn, not split
-    atomic_inc(&split_peripheral_count);
     // Re-evaluate adv params now that connectivity changed.
     if (adv_started) {
         k_work_cancel_delayable(&adv_work);
@@ -512,39 +528,12 @@ static void prospector_ble_disconnected(struct bt_conn *conn, uint8_t reason) {
         prospector_adv_active = false;
         LOG_INF("📡 Disconnect detected - stopped own ADV for ZMK handoff");
     }
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    struct bt_conn_info info;
-    if (bt_conn_get_info(conn, &info) < 0) return;
-    if (info.role != BT_CONN_ROLE_CENTRAL) return;
-    atomic_dec(&split_peripheral_count);
-    if (atomic_get(&split_peripheral_count) < 0) {
-        atomic_set(&split_peripheral_count, 0); // defensive
-    }
-#endif
 }
 
 static struct bt_conn_cb prospector_conn_callbacks = {
     .connected = prospector_ble_connected,
     .disconnected = prospector_ble_disconnected,
 };
-
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-// Seed helper: count split-peripheral connections that were established
-// BEFORE our conn callback got registered. bt_conn_cb_register() only
-// delivers events for future connections; the ZMK split central starts
-// scanning earlier in boot than our SYS_INIT priority, so a fast-pairing
-// peripheral (typical when both halves power on together) is already
-// connected by the time we run. Without this seed the counter stays 0,
-// prospector_split_fully_connected() never turns true, and the
-// burst/silent cycle stays engaged forever. Fixes issue #22.
-static void prospector_seed_split_conn(struct bt_conn *conn, void *user_data) {
-    ARG_UNUSED(user_data);
-    struct bt_conn_info info;
-    if (bt_conn_get_info(conn, &info) < 0) return;
-    if (info.role != BT_CONN_ROLE_CENTRAL) return; // host-side conn, not split
-    atomic_inc(&split_peripheral_count);
-}
-#endif
 
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_BLE) && IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
 // Peripheral battery event listener for split keyboards
@@ -746,6 +735,12 @@ static void build_manufacturer_payload(void) {
 #ifndef CONFIG_ZMK_STATUS_ADV_AUX2_PERIPHERAL
 #define CONFIG_ZMK_STATUS_ADV_AUX2_PERIPHERAL 2
 #endif
+#ifndef CONFIG_ZMK_STATUS_ADV_LEFT_PERIPHERAL
+#define CONFIG_ZMK_STATUS_ADV_LEFT_PERIPHERAL 0
+#endif
+#ifndef CONFIG_ZMK_STATUS_ADV_RIGHT_PERIPHERAL
+#define CONFIG_ZMK_STATUS_ADV_RIGHT_PERIPHERAL 1
+#endif
 
     // Get peripheral batteries using configurable indices
     uint8_t half_battery = peripheral_batteries[CONFIG_ZMK_STATUS_ADV_HALF_PERIPHERAL];
@@ -769,6 +764,17 @@ static void build_manufacturer_payload(void) {
         manufacturer_data.peripheral_battery[1] = aux1_battery;    // Aux1 (e.g., trackball)
         manufacturer_data.peripheral_battery[2] = aux2_battery;    // Aux2
         // battery_level already has central battery, no change needed
+    } else if (strcmp(central_side, "AUX") == 0) {
+        // Central is neither keyboard half (e.g. trackball unit as central).
+        // Both halves are peripherals; the central's own battery is shown
+        // in the Aux1 slot.
+        uint8_t central_battery = battery_level;
+        manufacturer_data.battery_level =                          // Left arc
+            peripheral_batteries[CONFIG_ZMK_STATUS_ADV_LEFT_PERIPHERAL];
+        manufacturer_data.peripheral_battery[0] =                  // Right arc
+            peripheral_batteries[CONFIG_ZMK_STATUS_ADV_RIGHT_PERIPHERAL];
+        manufacturer_data.peripheral_battery[1] = central_battery; // Aux1 = central itself
+        manufacturer_data.peripheral_battery[2] = aux2_battery;    // Aux2
     } else {
         // Central is on RIGHT physical side (default)
         // battery_level (LEFT arc) = peripheral half (swap needed)
@@ -923,6 +929,12 @@ static void adv_work_handler(struct k_work *work) {
 
     build_manufacturer_payload();
 
+    // Evaluate split connectivity once per handler run: the on-demand
+    // bt_conn_foreach walk is cheap but not free, and a single snapshot
+    // keeps the three decision points below mutually consistent even if a
+    // peripheral connects/disconnects mid-handler.
+    const bool split_ready = prospector_split_fully_connected();
+
     // ---- Burst/silent cycle gate (split central waiting for peripherals) ----
     //
     // While split is partial, enforce explicit time-multiplexing: yield the
@@ -930,7 +942,7 @@ static void adv_work_handler(struct k_work *work) {
     // CONNECT_REQ tx happen without collision. Adv only fires during the
     // BURST window. Net "scanner adv up-time" defaults to 10% (1s/10s).
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    if (!prospector_split_fully_connected()) {
+    if (!split_ready) {
         const uint32_t burst_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_BURST_MS;
         const uint32_t silent_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS;
         const uint32_t cycle_ms = burst_ms + silent_ms;
@@ -1027,7 +1039,7 @@ static void adv_work_handler(struct k_work *work) {
             // ZMK not advertising → start our own ADV
             zmk_adv_was_active = false;
 
-            if (!prospector_split_fully_connected()) {
+            if (!split_ready) {
                 // BURST phase of the burst/silent cycle (silent phase is
                 // handled at the top of adv_work_handler and short-circuits
                 // before reaching this code). Use fast adv interval so the
@@ -1091,7 +1103,7 @@ static void adv_work_handler(struct k_work *work) {
     // transition to SILENT on time. Without this, the idle 30s schedule
     // would let the burst run for 30s before the silent check fires.
 #if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    if (!prospector_split_fully_connected()) {
+    if (!split_ready) {
         const uint32_t burst_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_BURST_MS;
         const uint32_t silent_ms = CONFIG_PROSPECTOR_SPLIT_PARTIAL_SILENT_MS;
         const uint32_t cycle_ms = burst_ms + silent_ms;
@@ -1179,21 +1191,15 @@ static int init_prospector_status(PROSPECTOR_SYS_INIT_ARGS) {
     last_activity_time = k_uptime_get_32();
     is_active = true; // Start in active mode
 
-    // Register conn callback. The connected handler counts split-peripheral
-    // connections (used by prospector_split_fully_connected() to choose adv
-    // params) and triggers an immediate adv re-evaluation, which has the
+    // Register conn callback. The connected handler triggers an immediate
+    // adv re-evaluation when a split peripheral connects, which has the
     // useful side effect of kicking the BLE scheduler into reconsidering
     // the adv set state right after a peripheral connects -- this measurably
     // helps the next peripheral get discovered. The disconnected handler
-    // stops own ADV before ZMK restarts.
-#if IS_ENABLED(CONFIG_ZMK_SPLIT_ROLE_CENTRAL)
-    // Count peripherals that connected before this init ran (issue #22);
-    // seed BEFORE registering so a connect landing in between is counted
-    // once by the callback rather than twice.
-    bt_conn_foreach(BT_CONN_TYPE_LE, prospector_seed_split_conn, NULL);
-    LOG_INF("Prospector: seeded split peripheral count = %ld",
-            (long)atomic_get(&split_peripheral_count));
-#endif
+    // stops own ADV before ZMK restarts. Note: split connectivity itself is
+    // NOT tracked via these callbacks -- prospector_split_fully_connected()
+    // walks the connection table on demand, so peripherals that connected
+    // before this registration are still counted (issue #22).
     bt_conn_cb_register(&prospector_conn_callbacks);
 
     // Start hybrid advertising with initial burst for immediate scanner detection

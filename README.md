@@ -4,7 +4,7 @@ ZMK module for Prospector status display devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![ZMK Compatible](https://img.shields.io/badge/ZMK-compatible-blue)](https://zmk.dev/)
-[![Version](https://img.shields.io/badge/version-v2.2.0-green)](https://github.com/t-ogura/zmk-config-prospector/releases)
+[![Version](https://img.shields.io/badge/version-v2.2.3-green)](https://github.com/t-ogura/zmk-config-prospector/releases)
 
 ## Overview
 
@@ -22,7 +22,7 @@ Add to your keyboard's `west.yml`:
 ```yaml
 - name: prospector-zmk-module
   remote: prospector  # url-base: https://github.com/t-ogura
-  revision: v2.2.0
+  revision: v2.2.3
   path: modules/prospector-zmk-module
 ```
 
@@ -32,6 +32,13 @@ Add to your keyboard's `.conf` file:
 # Required
 CONFIG_ZMK_STATUS_ADVERTISEMENT=y
 CONFIG_ZMK_STATUS_ADV_KEYBOARD_NAME="MyKeyboard"
+
+# Split keyboards: only the CENTRAL build broadcasts status (it is the
+# side that knows the layer, active profile and the other half's battery),
+# so make sure these settings are in effect for whichever build is your
+# central. If you use a dongle, the dongle IS the central - put them in
+# its config. A peripheral build with them enabled just stays silent, so
+# a single .conf shared by both halves is fine.
 
 # Optional: Channel pairing (0=broadcast to all scanners)
 CONFIG_PROSPECTOR_CHANNEL=0
@@ -43,11 +50,22 @@ CONFIG_ZMK_STATUS_ADV_IDLE_INTERVAL_MS=30000
 CONFIG_ZMK_STATUS_ADV_ACTIVITY_TIMEOUT_MS=5000
 
 # Split keyboard: specify central side (default: RIGHT)
+# "LEFT" / "RIGHT": central is that keyboard half
+# "AUX": central is neither half (e.g. trackball unit as central);
+#        both halves are peripherals and the central's battery is
+#        shown in the Aux1 slot
 CONFIG_ZMK_STATUS_ADV_CENTRAL_SIDE="LEFT"
 
 # Split keyboard: peripheral slot mapping (for 3+ device setups)
 # CONFIG_ZMK_STATUS_ADV_HALF_PERIPHERAL=1
 # CONFIG_ZMK_STATUS_ADV_AUX1_PERIPHERAL=0
+
+# CENTRAL_SIDE="AUX" only: which peripheral index is each keyboard half
+# CONFIG_ZMK_STATUS_ADV_LEFT_PERIPHERAL=0
+# CONFIG_ZMK_STATUS_ADV_RIGHT_PERIPHERAL=1
+# CENTRAL_SIDE="AUX" only: an AUX central has BOTH halves as peripherals,
+# so raise the expected count from its default of 1 (see Kconfig help):
+# CONFIG_PROSPECTOR_EXPECTED_PERIPHERAL_COUNT=2
 ```
 
 ### Compatibility

@@ -36,40 +36,16 @@
 #include "brightness_control.h"  /* For auto brightness sensor control */
 #include "display_settings.h"   /* NVS persistence for display settings */
 #include "prospector_layouts.h"  /* Carrefinho-inspired display layouts */
+#include "fault_recovery.h"      /* Crash recovery + display watchdog feed */
 
 LOG_MODULE_REGISTER(display_screen, LOG_LEVEL_INF);
 
-/* ========== Pending Display Data from scanner_stub.c ========== */
-/* Work queue sets data + flag, LVGL timer here processes it in main thread */
-#define MAX_NAME_LEN 32
-struct pending_display_data {
-    volatile bool update_pending;
-    volatile bool signal_update_pending;  /* Signal widget updates separately (1Hz) */
-    volatile bool no_keyboards;           /* True when all keyboards timed out */
-    char device_name[MAX_NAME_LEN];
-    char layer_name[4];
-    int layer;
-    int wpm;
-    bool usb_ready;
-    bool ble_connected;
-    bool ble_bonded;
-    int profile;
-    uint8_t modifiers;
-    int bat[4];
-    int8_t rssi;
-    float rate_hz;
-    int scanner_battery;
-    bool scanner_battery_pending;
-};
-
-/* Defined in scanner_stub.c */
-extern bool scanner_get_pending_update(struct pending_display_data *out);
-extern bool scanner_is_signal_pending(void);
-extern volatile int8_t scanner_signal_rssi;
-extern volatile int32_t scanner_signal_rate_x100;  /* rate * 100 */
-extern bool scanner_get_pending_battery(int *level);
-extern bool scanner_get_kb_version(uint8_t *major, uint8_t *minor, uint8_t *patch,
-                                    bool *is_dev, char *name, size_t name_len);
+/* ========== Pending Display Data from scanner_core.c ========== */
+/* Work queue sets data + flag, LVGL timer here processes it on the display
+ * thread. struct pending_display_data + getter declarations come from
+ * zmk/scanner_core.h - NEVER redefine them locally (a drifted local copy once
+ * caused an 8-byte stack overwrite in scanner_get_pending_update). */
+#include <zmk/scanner_core.h>
 
 /* LVGL timer for processing pending updates in main thread */
 static lv_timer_t *pending_update_timer = NULL;
@@ -99,6 +75,24 @@ static lv_timer_t *swipe_process_timer = NULL;
 /* Auto brightness timer - reads sensor and adjusts brightness when auto mode enabled */
 static lv_timer_t *auto_brightness_timer = NULL;
 #define AUTO_BRIGHTNESS_INTERVAL_MS 1000  /* Check sensor every 1 second */
+static void auto_brightness_timer_cb(lv_timer_t *timer);
+static bool ds_auto_brightness_enabled = false;
+
+/* Create the 1s sensor-poll timer (display thread only). Shared by the
+ * settings switch and boot-time restore of a persisted "auto" setting -
+ * previously only the switch created it, so auto brightness silently did
+ * nothing after every reboot until the user toggled the switch. */
+static void start_auto_brightness_timer(void) {
+    if (!ds_auto_brightness_enabled || !brightness_control_sensor_available()) {
+        return;
+    }
+    if (!auto_brightness_timer) {
+        auto_brightness_timer = lv_timer_create(auto_brightness_timer_cb, AUTO_BRIGHTNESS_INTERVAL_MS, NULL);
+        LOG_INF("Auto brightness timer started (%d ms interval)", AUTO_BRIGHTNESS_INTERVAL_MS);
+    }
+    /* Trigger immediate sensor read */
+    auto_brightness_timer_cb(NULL);
+}
 
 /* Forward declarations */
 static void destroy_main_screen_widgets(void);
@@ -295,7 +289,7 @@ static lv_obj_t *ds_slide_switch = NULL;
 static lv_obj_t *ds_nav_hint = NULL;
 
 /* Display Settings State (persists across screen transitions, backed by NVS) */
-static bool ds_auto_brightness_enabled = false;
+/* ds_auto_brightness_enabled is declared near AUTO_BRIGHTNESS_INTERVAL_MS */
 static uint8_t ds_manual_brightness = 65;
 /* Battery visible if CONFIG_PROSPECTOR_BATTERY_SUPPORT=y in config */
 static bool ds_battery_visible = IS_ENABLED(CONFIG_PROSPECTOR_BATTERY_SUPPORT);
@@ -318,6 +312,7 @@ static void load_display_settings(void) {
     /* Apply saved brightness setting */
     if (ds_auto_brightness_enabled) {
         brightness_control_set_auto(true);
+        start_auto_brightness_timer();
     } else {
         set_pwm_brightness(ds_manual_brightness);
     }
@@ -512,13 +507,17 @@ static char last_keyboard_name[MAX_NAME_LEN] = "";  /* Track keyboard changes */
 static void pending_update_timer_cb(lv_timer_t *timer) {
     ARG_UNUSED(timer);
 
+    /* Watchdog feed FIRST - before any early return below. This timer is
+     * the proof that the display thread is still ticking. */
+    fault_recovery_display_alive();
+
     /* Heartbeat: log every 30 seconds to detect display thread hangs */
     static uint32_t heartbeat_counter = 0;
     if (++heartbeat_counter % 300 == 0) {  /* 300 × 100ms = 30s */
         LOG_INF("Display heartbeat #%u (screen=%d)", heartbeat_counter / 300, current_screen);
     }
 
-    /* Ring buffer is drained by process_work in scanner_stub.c (work queue context).
+    /* Ring buffer is drained by process_work in scanner_core.c (work queue context).
      * LVGL timer only handles display updates from pending_data. */
 
     /* Skip display updates during screen transitions (defensive guard) */
@@ -958,7 +957,7 @@ lv_obj_t *zmk_display_status_screen(void) {
     return screen;
 }
 
-/* ========== Widget Update Functions (called from scanner_stub.c) ========== */
+/* ========== Widget Update Functions (called from scanner_core.c) ========== */
 
 void display_update_device_name(const char *name) {
     if (name) {
@@ -1023,12 +1022,21 @@ static void layer_pos_x_anim_cb(void *var, int32_t value) {
     lv_obj_set_x((lv_obj_t *)var, value);
 }
 
-/* Animation callback for pulse scale effect */
+/* Animation callback for pulse highlight effect.
+ *
+ * Deliberately NOT a transform (scale/rotate). With LV_USE_MATRIX off,
+ * any transformed object forces LVGL to render it through a separate
+ * layer whose buffer (4-7KB, contiguous) comes from the 32/64KB LVGL
+ * pool on EVERY frame. Once the pool is fragmented that allocation fails
+ * and, with LV_USE_OS=0, lv_refr's draw_buf_flush() spins forever in
+ * lv_draw_dispatch_wait_for_request() - the display thread never returns
+ * and the last frame stays on the LCD. A text-opacity pulse is drawn
+ * in-place with no layer, so this failure mode cannot occur. */
 static void layer_pulse_anim_cb(void *var, int32_t value) {
-    /* value goes 100 -> 130 -> 100 (percentage) */
+    /* value goes 0 -> 100 -> 0: dip the text to ~50% and back */
     lv_obj_t *label = (lv_obj_t *)var;
-    int32_t scale = (value * 256) / 100;  /* Convert to LVGL scale (256 = 100%) */
-    lv_obj_set_style_transform_scale(label, scale, 0);
+    lv_opa_t opa = (lv_opa_t)(LV_OPA_COVER - (value * 128) / 100);
+    lv_obj_set_style_text_opa(label, opa, 0);
 }
 
 /* Helper to create layer list widgets */
@@ -1139,7 +1147,7 @@ static void start_pulse_anim(lv_obj_t *obj) {
     lv_anim_init(&anim);
     lv_anim_set_var(&anim, obj);
     lv_anim_set_exec_cb(&anim, layer_pulse_anim_cb);
-    lv_anim_set_values(&anim, 100, 125);  /* Scale 100% -> 125% */
+    lv_anim_set_values(&anim, 0, 100);  /* opacity dip 0% -> 100% of effect */
     lv_anim_set_time(&anim, 100);  /* 100ms expand */
     lv_anim_set_playback_time(&anim, 100);  /* 100ms shrink back */
     lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
@@ -2108,6 +2116,18 @@ static void create_main_screen_widgets(void) {
 static void ds_custom_slider_drag_cb(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     lv_obj_t *slider = lv_event_get_target(e);
+
+    /* LVGL delivers INDEV_RESET (pressed object deleted / indev reset)
+     * or PRESS_LOST instead of RELEASED in some paths. Without handling
+     * them ui_interaction_active would stay true forever, which makes
+     * every later swipe and list update return early - a permanent UI
+     * lockup. Treat both as a cancelled drag. */
+    if (code == LV_EVENT_INDEV_RESET || code == LV_EVENT_PRESS_LOST) {
+        slider_drag_state.active_slider = NULL;
+        slider_drag_state.drag_cancelled = false;
+        ui_interaction_active = false;
+        return;
+    }
     lv_indev_t *indev = lv_indev_active();
     if (!indev) return;
 
@@ -2249,12 +2269,7 @@ static void ds_auto_switch_event_cb(lv_event_t *e) {
 
     /* Start/stop auto brightness timer */
     if (checked && brightness_control_sensor_available()) {
-        if (!auto_brightness_timer) {
-            auto_brightness_timer = lv_timer_create(auto_brightness_timer_cb, AUTO_BRIGHTNESS_INTERVAL_MS, NULL);
-            LOG_INF("Auto brightness timer started (%d ms interval)", AUTO_BRIGHTNESS_INTERVAL_MS);
-        }
-        /* Trigger immediate sensor read */
-        auto_brightness_timer_cb(NULL);
+        start_auto_brightness_timer();
     } else if (auto_brightness_timer) {
         lv_timer_del(auto_brightness_timer);
         auto_brightness_timer = NULL;
@@ -2518,6 +2533,8 @@ static void create_display_settings_widgets(void) {
     lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(ds_brightness_slider, ds_custom_slider_drag_cb, LV_EVENT_INDEV_RESET, NULL);
 
     /* Brightness value label */
     ds_brightness_value = lv_label_create(screen_obj);
@@ -2626,6 +2643,8 @@ static void create_display_settings_widgets(void) {
     lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSED, NULL);
     lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_RELEASED, NULL);
+    lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_PRESS_LOST, NULL);
+    lv_obj_add_event_cb(ds_layer_slider, ds_custom_slider_drag_cb, LV_EVENT_INDEV_RESET, NULL);
 
     /* Layer value label (aligned with Brightness value at x=230) */
     ds_layer_value = lv_label_create(screen_obj);
@@ -2764,9 +2783,9 @@ static void create_system_settings_widgets(void) {
 
 /* ========== Keyboard Select Screen Functions ========== */
 
-/* External functions from scanner_stub.c */
+/* External functions from scanner_core.c */
 extern int scanner_get_selected_keyboard(void);
-extern void scanner_set_selected_keyboard(int index);
+extern int scanner_set_selected_keyboard(int index);
 
 /* RSSI helper functions (same as original keyboard_list_widget.c) */
 static uint8_t ks_rssi_to_bars(int8_t rssi) {
@@ -2797,8 +2816,14 @@ static void ks_entry_click_cb(lv_event_t *e) {
 
     ks_selected_keyboard = keyboard_index;
 
-    /* Update scanner_stub.c to display this keyboard on main screen */
-    scanner_set_selected_keyboard(keyboard_index);
+    /* Update scanner_core.c to display this keyboard on main screen */
+    if (scanner_set_selected_keyboard(keyboard_index) != 0) {
+        /* Core was busy: keep UI and core consistent by not pretending
+         * the selection changed. The user simply taps again. */
+        LOG_WRN("Keyboard %d selection not applied (core busy) - tap again", keyboard_index);
+        ks_selected_keyboard = -1;
+        return;
+    }
 
     /* Update visual state for all entries */
     for (int i = 0; i < ks_entry_count; i++) {
@@ -3154,15 +3179,15 @@ static void ks_update_entries(void) {
 
     uint8_t scanner_ch = scanner_get_runtime_channel();
 
+    struct zmk_keyboard_status kbd;
     for (int i = 0; i < CONFIG_PROSPECTOR_MAX_KEYBOARDS && active_count < KS_MAX_KEYBOARDS; i++) {
-        struct zmk_keyboard_status *kbd = zmk_status_scanner_get_keyboard(i);
-        if (!kbd || !kbd->active) continue;
+        if (!zmk_status_scanner_copy_keyboard(i, &kbd)) continue;
 
         /* Channel filtering:
          *   scanner_ch = CHANNEL_ALL (10): Show all keyboards
          *   scanner_ch = 0-9: Only show keyboards with matching channel
          */
-        if (scanner_ch != CHANNEL_ALL && kbd->data.channel != scanner_ch) {
+        if (scanner_ch != CHANNEL_ALL && kbd.data.channel != scanner_ch) {
             continue;  /* Skip keyboards that don't match filter */
         }
 
@@ -3206,23 +3231,21 @@ static void ks_update_entries(void) {
 
         for (int i = 0; i < active_count; i++) {
             int kbd_idx = active_keyboards[i];
-            struct zmk_keyboard_status *kbd = zmk_status_scanner_get_keyboard(kbd_idx);
-            if (!kbd) continue;
+            if (!zmk_status_scanner_copy_keyboard(kbd_idx, &kbd)) continue;
 
-            const char *name = kbd->ble_name[0] ? kbd->ble_name : "Unknown";
-            uint8_t channel = kbd->data.channel;  /* Get keyboard's channel */
-            ks_create_entry(i, y_pos + (i * spacing), kbd_idx, name, kbd->rssi, channel);
+            const char *name = kbd.ble_name[0] ? kbd.ble_name : "Unknown";
+            uint8_t channel = kbd.data.channel;  /* Get keyboard's channel */
+            ks_create_entry(i, y_pos + (i * spacing), kbd_idx, name, kbd.rssi, channel);
         }
         ks_entry_count = active_count;
     } else {
         /* Just update existing entries (same channel filter as creation path) */
         int entry_idx = 0;
         for (int i = 0; i < CONFIG_PROSPECTOR_MAX_KEYBOARDS && entry_idx < ks_entry_count; i++) {
-            struct zmk_keyboard_status *kbd = zmk_status_scanner_get_keyboard(i);
-            if (!kbd || !kbd->active) continue;
+            if (!zmk_status_scanner_copy_keyboard(i, &kbd)) continue;
 
             /* Apply same channel filter as creation path */
-            if (scanner_ch != CHANNEL_ALL && kbd->data.channel != scanner_ch) {
+            if (scanner_ch != CHANNEL_ALL && kbd.data.channel != scanner_ch) {
                 continue;
             }
 
@@ -3233,15 +3256,15 @@ static void ks_update_entries(void) {
             }
 
             /* Update name */
-            const char *name = kbd->ble_name[0] ? kbd->ble_name : "Unknown";
+            const char *name = kbd.ble_name[0] ? kbd.ble_name : "Unknown";
             lv_label_set_text(entry->name_label, name);
 
             /* Update RSSI */
-            uint8_t bars = ks_rssi_to_bars(kbd->rssi);
+            uint8_t bars = ks_rssi_to_bars(kbd.rssi);
             lv_bar_set_value(entry->rssi_bar, bars, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(entry->rssi_bar, ks_get_rssi_color(bars), LV_PART_INDICATOR);
             char rssi_buf[16];
-            snprintf(rssi_buf, sizeof(rssi_buf), "%ddBm", kbd->rssi);
+            snprintf(rssi_buf, sizeof(rssi_buf), "%ddBm", kbd.rssi);
             lv_label_set_text(entry->rssi_label, rssi_buf);
 
             /* Update selection styling */
@@ -3304,7 +3327,7 @@ static void destroy_keyboard_select_widgets(void) {
 static void create_keyboard_select_widgets(void) {
     LOG_INF("Creating keyboard select widgets...");
 
-    /* Get current selection from scanner_stub.c */
+    /* Get current selection from scanner_core.c */
     ks_selected_keyboard = scanner_get_selected_keyboard();
     LOG_INF("Current selected keyboard: %d", ks_selected_keyboard);
 

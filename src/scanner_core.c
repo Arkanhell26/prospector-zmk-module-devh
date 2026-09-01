@@ -1,15 +1,20 @@
 /**
- * Scanner Message Handler - Connects BLE scanner to display widgets
+ * Scanner Core - keyboard state tracking shared by every scanner shield
  *
  * Architecture (ring buffer + work handler, matching v2.1.0 timing):
  *   BT RX thread → ring buffer push (non-blocking, no mutex)
  *   Work handler (100ms) → scanner_process_incoming() → drain ring buffer
  *                         → manage keyboards[] → set pending_data
- *   LVGL timer (100ms)   → read pending_data → widget update (display only)
+ *   Display thread       → read pending_data → widget update (display only)
  *
  * Key design: Data processing (work handler) is separated from display
- * rendering (LVGL timer), matching v2.1.0's proven architecture.
- * The ring buffer eliminates mutex on the BT RX hot path.
+ * rendering, matching v2.1.0's proven architecture. The ring buffer
+ * eliminates mutex on the BT RX hot path.
+ *
+ * This file contains NO display code and must stay shield-agnostic: it is
+ * built for every scanner shield (prospector_scanner, scanner_pocket, ...).
+ * Anything that touches LVGL, a panel, or a specific input device belongs
+ * in the shield, not here.
  */
 
 #include <zephyr/kernel.h>
@@ -18,7 +23,8 @@
 #include <zephyr/sys/atomic.h>
 #include <zmk/status_scanner.h>
 #include <zmk/status_advertisement.h>
-#include <lvgl.h>
+
+#include <zmk/scanner_core.h>  /* pending_display_data + own API declarations */
 
 #if IS_ENABLED(CONFIG_ZMK_BATTERY_REPORTING)
 #include <zmk/battery.h>
@@ -38,7 +44,7 @@ extern int zmk_status_scanner_start(void);
 /* Uses struct zmk_keyboard_status from zmk/status_scanner.h as single source of truth */
 
 #define MAX_KEYBOARDS ZMK_STATUS_SCANNER_MAX_KEYBOARDS
-#define MAX_NAME_LEN 32
+/* MAX_NAME_LEN (32) comes from zmk/scanner_core.h */
 
 static struct zmk_keyboard_status keyboards[MAX_KEYBOARDS];
 static int selected_keyboard = 0;
@@ -47,7 +53,11 @@ static bool mutex_initialized = false;
 
 /* ========== SPSC Ring Buffer (BT RX → LVGL timer) ========== */
 
-#define INCOMING_BUF_SIZE 16  /* Must be power of 2 */
+/* 32 entries (~2.2KB): a profile-change burst (5 adv × multiple keyboards)
+ * arriving within one 50ms batch window must not overflow the ring, or the
+ * very advertisement carrying the change gets dropped and the display
+ * appears stuck until the next steady-state advert. */
+#define INCOMING_BUF_SIZE 32  /* Must be power of 2 */
 
 struct incoming_adv {
     struct zmk_status_adv_data data;
@@ -88,46 +98,33 @@ static bool incoming_pop(struct incoming_adv *out) {
     return true;
 }
 
-/* ========== Pending Display Data (set by LVGL timer, read by LVGL timer) ========== */
-
-struct pending_display_data {
-    volatile bool update_pending;
-    volatile bool signal_update_pending;  /* Signal widget updates separately (1Hz) */
-    volatile bool no_keyboards;           /* True when all keyboards timed out */
-
-    char device_name[MAX_NAME_LEN];
-    char layer_name[4];
-    int layer;
-    int wpm;
-    bool usb_ready;
-    bool ble_connected;
-    bool ble_bonded;
-    int profile;
-    uint8_t modifiers;
-    int bat[4];
-    int8_t rssi;
-    float rate_hz;
-    int scanner_battery;
-    bool scanner_battery_pending;
-
-    /* Keyboard firmware version (decoded from version + profile_slot fields) */
-    uint8_t kb_version_major;
-    uint8_t kb_version_minor;
-    uint8_t kb_version_patch;
-    bool kb_version_dev;
-    bool kb_version_valid;       /* True after first keyboard data received */
-};
+/* ========== Pending Display Data (written by workqueue, read by display thread) ========== */
+/* Struct definition lives in zmk/scanner_core.h - the single source of truth. */
 
 static struct pending_display_data pending_data = {0};
 
-/* Getter for pending data - called from LVGL timer in main thread */
+/* Getters below run on the dedicated LVGL display thread, while
+ * process_work_handler mutates pending_data on the system workqueue under
+ * data_mutex. They MUST take the same mutex: an unlocked bulk copy can
+ * observe a half-written record (torn device_name/layer_name, stale flags).
+ * On lock timeout we report "nothing pending" - the LVGL timer polls again
+ * on its next tick, so nothing is lost. */
+
+/* Getter for pending data - called from LVGL display thread */
 bool scanner_get_pending_update(struct pending_display_data *out) {
-    if (!pending_data.update_pending) {
+    if (!mutex_initialized || !pending_data.update_pending) {
         return false;
     }
-    *out = pending_data;
-    pending_data.update_pending = false;
-    return true;
+    if (k_mutex_lock(&data_mutex, K_MSEC(10)) != 0) {
+        return false;
+    }
+    bool pending = pending_data.update_pending;
+    if (pending) {
+        *out = pending_data;
+        pending_data.update_pending = false;
+    }
+    k_mutex_unlock(&data_mutex);
+    return pending;
 }
 
 /* Global signal data - set by process_incoming, read by timer callback */
@@ -141,38 +138,61 @@ static void set_signal_data(int8_t rssi, int32_t rate_x100) {
 
 /* Check if signal update is pending */
 bool scanner_is_signal_pending(void) {
-    if (!pending_data.signal_update_pending) {
+    if (!mutex_initialized || !pending_data.signal_update_pending) {
         return false;
     }
+    if (k_mutex_lock(&data_mutex, K_MSEC(10)) != 0) {
+        return false;
+    }
+    bool pending = pending_data.signal_update_pending;
     pending_data.signal_update_pending = false;
-    return true;
+    k_mutex_unlock(&data_mutex);
+    return pending;
 }
 
 /* Get keyboard firmware version (from last received advertisement) */
 bool scanner_get_kb_version(uint8_t *major, uint8_t *minor, uint8_t *patch,
                             bool *is_dev, char *name, size_t name_len) {
-    if (!pending_data.kb_version_valid) {
+    if (!mutex_initialized || !pending_data.kb_version_valid) {
         return false;
     }
-    if (major) *major = pending_data.kb_version_major;
-    if (minor) *minor = pending_data.kb_version_minor;
-    if (patch) *patch = pending_data.kb_version_patch;
-    if (is_dev) *is_dev = pending_data.kb_version_dev;
-    if (name && name_len > 0) {
-        strncpy(name, pending_data.device_name, name_len - 1);
-        name[name_len - 1] = '\0';
+    /* Unlike the polled getters above, the only caller is one-shot (settings
+     * screen creation) and latches a false return as "KB: not connected"
+     * until the screen is reopened. Use a generous timeout - worst-case
+     * mutex hold by the workqueue is a full ring drain (a few ms). */
+    if (k_mutex_lock(&data_mutex, K_MSEC(100)) != 0) {
+        return false;
     }
-    return true;
+    bool valid = pending_data.kb_version_valid;
+    if (valid) {
+        if (major) *major = pending_data.kb_version_major;
+        if (minor) *minor = pending_data.kb_version_minor;
+        if (patch) *patch = pending_data.kb_version_patch;
+        if (is_dev) *is_dev = pending_data.kb_version_dev;
+        if (name && name_len > 0) {
+            strncpy(name, pending_data.device_name, name_len - 1);
+            name[name_len - 1] = '\0';
+        }
+    }
+    k_mutex_unlock(&data_mutex);
+    return valid;
 }
 
 /* Check if scanner battery update is pending */
 bool scanner_get_pending_battery(int *level) {
-    if (!pending_data.scanner_battery_pending) {
+    if (!mutex_initialized || !pending_data.scanner_battery_pending) {
         return false;
     }
-    *level = pending_data.scanner_battery;
-    pending_data.scanner_battery_pending = false;
-    return true;
+    if (k_mutex_lock(&data_mutex, K_MSEC(10)) != 0) {
+        return false;
+    }
+    bool pending = pending_data.scanner_battery_pending;
+    if (pending) {
+        *level = pending_data.scanner_battery;
+        pending_data.scanner_battery_pending = false;
+    }
+    k_mutex_unlock(&data_mutex);
+    return pending;
 }
 
 /* ========== Public API for Display ========== */
@@ -203,6 +223,15 @@ bool scanner_get_keyboard_data(int index, struct zmk_status_adv_data *data,
     return result;
 }
 
+/* Internal count - caller must hold data_mutex */
+static int count_active_locked(void) {
+    int count = 0;
+    for (int i = 0; i < MAX_KEYBOARDS; i++) {
+        if (keyboards[i].active) count++;
+    }
+    return count;
+}
+
 int scanner_get_active_keyboard_count(void) {
     if (!mutex_initialized) return 0;
 
@@ -210,10 +239,7 @@ int scanner_get_active_keyboard_count(void) {
         return 0;
     }
 
-    int count = 0;
-    for (int i = 0; i < MAX_KEYBOARDS; i++) {
-        if (keyboards[i].active) count++;
-    }
+    int count = count_active_locked();
 
     k_mutex_unlock(&data_mutex);
     return count;
@@ -223,22 +249,27 @@ int scanner_get_selected_keyboard(void) {
     return selected_keyboard;
 }
 
-struct zmk_keyboard_status *scanner_get_keyboard_status(int index) {
-    /* Note: Returns pointer under mutex protection. Caller must not hold
-     * the pointer across long operations. For keyboard selection screen,
-     * copy the data immediately. */
-    if (!mutex_initialized || index < 0 || index >= MAX_KEYBOARDS) {
-        return NULL;
+bool scanner_copy_keyboard_status(int index, struct zmk_keyboard_status *out) {
+    /* Snapshot the slot under the mutex. Never hand out a pointer into
+     * keyboards[]: the workqueue mutates slots (timeout clears active +
+     * ble_name, new data strncpy's the name) while the display thread
+     * would still be dereferencing it - a mid-strncpy read can see a
+     * momentarily unterminated ble_name and run strlen past the field. */
+    if (!mutex_initialized || !out || index < 0 || index >= MAX_KEYBOARDS) {
+        return false;
     }
 
     if (k_mutex_lock(&data_mutex, K_MSEC(10)) != 0) {
-        return NULL;
+        return false;
     }
 
-    struct zmk_keyboard_status *result = keyboards[index].active ? &keyboards[index] : NULL;
+    bool active = keyboards[index].active;
+    if (active) {
+        *out = keyboards[index];
+    }
 
     k_mutex_unlock(&data_mutex);
-    return result;
+    return active;
 }
 
 /* Helper: populate pending_data from keyboards[selected_keyboard] */
@@ -276,15 +307,24 @@ static void fill_pending_from_selected(void) {
     pending_data.update_pending = true;
 }
 
-void scanner_set_selected_keyboard(int index) {
-    if (index >= 0 && index < MAX_KEYBOARDS) {
-        if (mutex_initialized && k_mutex_lock(&data_mutex, K_MSEC(10)) == 0) {
-            selected_keyboard = index;
-            LOG_INF("Selected keyboard changed to slot %d", index);
-            fill_pending_from_selected();
-            k_mutex_unlock(&data_mutex);
-        }
+int scanner_set_selected_keyboard(int index) {
+    if (index < 0 || index >= MAX_KEYBOARDS) {
+        return -EINVAL;
     }
+    if (!mutex_initialized) {
+        return -EAGAIN;
+    }
+    /* User-driven, cold path (tap on the keyboard list): wait longer than
+     * the polled getters so a busy workqueue drain doesn't silently drop
+     * the selection and leave the UI highlight out of sync with the core. */
+    if (k_mutex_lock(&data_mutex, K_MSEC(100)) != 0) {
+        LOG_WRN("Could not select keyboard %d: core busy", index);
+        return -EBUSY;
+    }
+    selected_keyboard = index;
+    fill_pending_from_selected();
+    k_mutex_unlock(&data_mutex);
+    return 0;
 }
 
 /* ========== Periodic Process Work (drains ring buffer, updates keyboards[]) ========== */
@@ -406,6 +446,18 @@ void scanner_process_incoming(void) {
         } else if (index == selected_keyboard && !keyboards[index].active) {
             /* New keyboard appearing in selected slot = high priority */
             high_priority_change = true;
+        } else if (selected_keyboard < 0 || selected_keyboard >= MAX_KEYBOARDS ||
+                   !keyboards[selected_keyboard].active) {
+            /* The selected slot is dead (e.g. every keyboard timed out and
+             * this one came back into a different, lower free slot) and
+             * nothing else re-arms the selection in that case: the 1Hz
+             * push and the timeout re-arm both key off the selected slot.
+             * Without this the display stays on "Scanning..." forever
+             * while adverts flow normally. Adopt the arriving keyboard. */
+            LOG_INF("Selected slot %d inactive - adopting keyboard in slot %d",
+                    selected_keyboard, index);
+            selected_keyboard = index;
+            high_priority_change = true;
         }
 
         /* Store the data */
@@ -517,7 +569,10 @@ void scanner_process_incoming(void) {
             }
 
             if (any_timed_out) {
-                int active_count = scanner_get_active_keyboard_count();
+                /* Already holding data_mutex (process_work_handler) - use
+                 * the lock-free internal counter, not the public getter,
+                 * to avoid relying on k_mutex recursion */
+                int active_count = count_active_locked();
                 if (active_count == 0) {
                     LOG_INF("No active keyboards - returning to Scanning... state");
                     pending_data.no_keyboards = true;
@@ -562,9 +617,14 @@ void scanner_process_incoming(void) {
 
 /* ========== Process Work Handler ========== */
 
+__weak void scanner_core_process_alive(void) {
+    /* Default: nothing. Shields override to feed a watchdog. */
+}
+
 static void process_work_handler(struct k_work *work) {
     ARG_UNUSED(work);
     process_pending = false;
+    scanner_core_process_alive();
 
     if (mutex_initialized && k_mutex_lock(&data_mutex, K_MSEC(50)) == 0) {
         scanner_process_incoming();
@@ -614,26 +674,6 @@ int scanner_msg_send_keyboard_data(const struct zmk_status_adv_data *adv_data,
     return 0;
 }
 
-int scanner_msg_send_swipe(int direction) {
-    LOG_DBG("Swipe gesture: direction=%d", direction);
-    return 0;
-}
-
-int scanner_msg_send_tap(int16_t x, int16_t y) {
-    LOG_DBG("Tap: x=%d, y=%d", x, y);
-    return 0;
-}
-
-int scanner_msg_send_battery_update(void) {
-    /* Scanner battery is now handled by scanner_process_incoming() */
-    return 0;
-}
-
-int scanner_msg_send_timeout_check(void) {
-    /* Timeouts are now handled by scanner_process_incoming() */
-    return 0;
-}
-
 int scanner_msg_send_display_refresh(void) {
     /* Called from LVGL timer context (swipe handler) when returning to MAIN screen.
      * Fill pending_data directly from current keyboard state. */
@@ -649,26 +689,6 @@ int scanner_msg_send_display_refresh(void) {
     }
 
     k_mutex_unlock(&data_mutex);
-    return 0;
-}
-
-int scanner_msg_send_timeout_wake(void) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_sensor_read(void) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_set_target(uint8_t target_brightness) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_fade_step(void) {
-    return 0;
-}
-
-int scanner_msg_send_brightness_set_auto(bool enabled) {
     return 0;
 }
 
