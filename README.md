@@ -4,7 +4,7 @@ ZMK module for Prospector status display devices.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![ZMK Compatible](https://img.shields.io/badge/ZMK-compatible-blue)](https://zmk.dev/)
-[![Version](https://img.shields.io/badge/version-v2.2.0-green)](https://github.com/t-ogura/zmk-config-prospector/releases)
+[![Version](https://img.shields.io/badge/version-v2.2.3-green)](https://github.com/t-ogura/zmk-config-prospector/releases)
 
 ## Overview
 
@@ -22,7 +22,7 @@ Add to your keyboard's `west.yml`:
 ```yaml
 - name: prospector-zmk-module
   remote: prospector  # url-base: https://github.com/t-ogura
-  revision: v2.2.0
+  revision: v2.2.3
   path: modules/prospector-zmk-module
 ```
 
