@@ -382,7 +382,7 @@ static struct zmk_status_adv_data manufacturer_data; // Use structured data dire
 //   FORCE_NAME_IN_AD available (cormoran fork): name in AD → SD free for manufacturer
 //   FORCE_NAME_IN_AD absent (upstream Zephyr): name in SD → manufacturer must go in AD
 // Without this separation, 28-byte manufacturer + name in SD exceeds 31-byte limit → name truncated
-#if 1 /* BT_LE_ADV_OPT_FORCE_NAME_IN_AD is a Zephyr enum member, not a preprocessor macro - "#if defined()" can never detect it correctly. It exists in Zephyr 3.5+ (confirmed), so always use it. */
+#ifdef BT_LE_ADV_OPT_USE_NAME
 // Newer Zephyr: ZMK uses FORCE_NAME_IN_AD → name in AD, SD free for manufacturer data
 static struct bt_data zmk_ad_restore[] = {
     BT_DATA_BYTES(BT_DATA_GAP_APPEARANCE, BT_BYTES_LIST_LE16(CONFIG_BT_DEVICE_APPEARANCE)),
@@ -1019,7 +1019,7 @@ static void adv_work_handler(struct k_work *work) {
 
     if (!prospector_adv_active) {
         // Try piggyback on ZMK's advertising
-#if 1 /* BT_LE_ADV_OPT_FORCE_NAME_IN_AD is a Zephyr enum member, not a preprocessor macro - "#if defined()" can never detect it correctly. It exists in Zephyr 3.5+ (confirmed), so always use it. */
+#ifdef BT_LE_ADV_OPT_USE_NAME
         // Newer Zephyr: ZMK puts name in AD → SD is free for manufacturer data
         int err = bt_le_adv_update_data(zmk_ad_restore, ARRAY_SIZE(zmk_ad_restore),
                                         piggyback_sd, ARRAY_SIZE(piggyback_sd));
