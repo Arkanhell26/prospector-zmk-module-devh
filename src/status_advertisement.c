@@ -235,24 +235,24 @@ ZMK_SUBSCRIPTION(prospector_layer_listener, zmk_layer_state_changed);
 // Triggers on both press AND release for responsive display updates
 // NOTE: No burst mode for modifiers - they change too frequently and burst
 // would block scan response (device name) from being sent
-static int modifiers_changed_listener(const zmk_event_t *eh) {
-    const struct zmk_modifiers_state_changed *ev = as_zmk_modifiers_state_changed(eh);
-    if (ev) {
-        // Trigger on both press (state=true) and release (state=false)
-        LOG_DBG("🎹 Modifiers %s (0x%02x) - triggering burst advertisement",
-                ev->state ? "pressed" : "released", ev->modifiers);
-        if (adv_started) {
-            atomic_set(&burst_remaining, BURST_COUNT);
-            k_work_cancel_delayable(&adv_work);
-            k_work_schedule(&adv_work, K_NO_WAIT);
-        }
-    }
-    return ZMK_EV_EVENT_BUBBLE;
-}
-
-ZMK_LISTENER(prospector_modifiers_listener, modifiers_changed_listener);
-ZMK_SUBSCRIPTION(prospector_modifiers_listener, zmk_modifiers_state_changed);
-
+// static int modifiers_changed_listener(const zmk_event_t *eh) {
+//     const struct zmk_modifiers_state_changed *ev = as_zmk_modifiers_state_changed(eh);
+//     if (ev) {
+//         // Trigger on both press (state=true) and release (state=false)
+//         LOG_DBG("🎹 Modifiers %s (0x%02x) - triggering burst advertisement",
+//                 ev->state ? "pressed" : "released", ev->modifiers);
+//         if (adv_started) {
+//             atomic_set(&burst_remaining, BURST_COUNT);
+//             k_work_cancel_delayable(&adv_work);
+//             k_work_schedule(&adv_work, K_NO_WAIT);
+//         }
+//     }
+//     return ZMK_EV_EVENT_BUBBLE;
+// }
+// 
+// ZMK_LISTENER(prospector_modifiers_listener, modifiers_changed_listener);
+// ZMK_SUBSCRIPTION(prospector_modifiers_listener, zmk_modifiers_state_changed);
+// 
 // Activity state listener for sleep/wake handling
 // This ensures proper advertising restart after system sleep
 static int activity_state_listener(const zmk_event_t *eh) {
