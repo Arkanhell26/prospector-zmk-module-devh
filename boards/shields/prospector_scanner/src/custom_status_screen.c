@@ -109,7 +109,7 @@ static void swipe_process_timer_cb(lv_timer_t *timer);
 
 /* Display update functions - called from pending_update_timer_cb */
 void display_update_device_name(const char *name);
-void display_update_layer(int layer);
+void display_update_layer(int layer, const char *layer_name);
 void display_update_wpm(int wpm);
 void display_update_connection(bool usb_rdy, bool ble_conn, bool ble_bond, int profile);
 void display_update_modifiers(uint8_t mods);
@@ -503,6 +503,7 @@ static lv_color_t get_rssi_color(uint8_t bars) {
 
 /* ========== Pending Update Timer Callback (runs in main thread) ========== */
 static char last_keyboard_name[MAX_NAME_LEN] = "";  /* Track keyboard changes */
+static char g_layer_name_text[8] = "";  /* Active layer's short display name (from the keyboard's BLE broadcast, 4 chars) */
 
 static void pending_update_timer_cb(lv_timer_t *timer) {
     ARG_UNUSED(timer);
@@ -539,7 +540,7 @@ static void pending_update_timer_cb(lv_timer_t *timer) {
 
             /* Reset display to initial "Scanning..." state */
             display_update_device_name("Scanning...");
-            display_update_layer(0);
+            display_update_layer(0, "");
             display_update_wpm(0);
             display_update_connection(false, false, false, 0);
             display_update_modifiers(0);
@@ -598,7 +599,7 @@ static void pending_update_timer_cb(lv_timer_t *timer) {
         } else {
             /* SCREEN_MAIN: Update YADS-style widgets */
             display_update_device_name(data.device_name);
-            display_update_layer(data.layer);
+            display_update_layer(data.layer, data.layer_name);
             display_update_wpm(data.wpm);
             display_update_connection(data.usb_ready, data.ble_connected,
                                       data.ble_bonded, data.profile);
@@ -678,7 +679,7 @@ lv_obj_t *zmk_display_status_screen(void) {
     lv_obj_set_style_text_font(device_name_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(device_name_label, lv_color_white(), 0);
     lv_label_set_text(device_name_label, "Scanning...");
-    lv_obj_align(device_name_label, LV_ALIGN_TOP_MID, 0, 25);
+    lv_obj_align(device_name_label, LV_ALIGN_TOP_LEFT, 10, 25);
     LOG_INF("[INIT] device name created");
 
     /* ===== 2. Scanner Battery (TOP_RIGHT area) ===== */
@@ -730,7 +731,7 @@ lv_obj_t *zmk_display_status_screen(void) {
     lv_obj_align(transport_label, LV_ALIGN_TOP_RIGHT, -10, 53);
 
     /* Initial state: BLE with profile on new line */
-    lv_label_set_text(transport_label, "#ffffff BLE#\n#ffffff 0#");
+    lv_label_set_text(transport_label, "#ffffff " LV_SYMBOL_BLUETOOTH " BLE#\n#ffffff 0#");
 
     /* Profile label kept but hidden (integrated into transport_label) */
     ble_profile_label = lv_label_create(screen);
@@ -742,24 +743,18 @@ lv_obj_t *zmk_display_status_screen(void) {
 
     /* ===== 5. Layer Widget (CENTER area, y=85-120) ===== */
     LOG_INF("[INIT] Creating layer widget...");
-    layer_title_label = lv_label_create(screen);
-    lv_obj_set_style_text_font(layer_title_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(layer_title_label, lv_color_make(160, 160, 160), 0);
-    lv_obj_set_style_text_opa(layer_title_label, LV_OPA_70, 0);
-    lv_label_set_text(layer_title_label, "Layer");
-    lv_obj_align(layer_title_label, LV_ALIGN_TOP_MID, 0, 82);  /* 3px up */
+    /* "Layer" title removed - the layer-name widget below is self-explanatory */
 
-    /* Create layer display - slide mode OR fixed mode (list/over-max) */
+    /* Always show a single centered layer-name label (never the list of all
+     * layers). Reuses the widget/animation previously only used as the
+     * "over max layers" fallback. */
     if (ds_layer_slide_mode) {
         /* Slide mode: create 7-slot dial display */
         create_layer_slide_widgets(screen, 105);
         layer_mode_over_max = false;  /* Not used in slide mode */
-    } else if (active_layer >= ds_max_layers) {
+    } else {
         layer_mode_over_max = true;
         create_over_max_widget(screen, active_layer, 105);
-    } else {
-        layer_mode_over_max = false;
-        create_layer_list_widgets(screen, 105);
     }
     LOG_INF("[INIT] layer widget created");
 
@@ -868,17 +863,17 @@ lv_obj_t *zmk_display_status_screen(void) {
     lv_obj_set_style_text_font(channel_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(channel_label, lv_color_make(0x80, 0x80, 0x80), 0);
     lv_label_set_text(channel_label, "Ch:0");
-    lv_obj_set_pos(channel_label, 62, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(channel_label, 62, 259);  /* moved below battery bars */
 
     rx_title_label = lv_label_create(screen);
     lv_obj_set_style_text_font(rx_title_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rx_title_label, lv_color_make(0x80, 0x80, 0x80), 0);
     lv_label_set_text(rx_title_label, "RX:");
-    lv_obj_set_pos(rx_title_label, 102, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(rx_title_label, 102, 259);  /* moved below battery bars */
 
     rssi_bar = lv_bar_create(screen);
     lv_obj_set_size(rssi_bar, 30, 8);
-    lv_obj_set_pos(rssi_bar, 130, 223);  /* RX indicator position */
+    lv_obj_set_pos(rssi_bar, 130, 263);  /* moved below battery bars */
     lv_bar_set_range(rssi_bar, 0, 5);
     lv_bar_set_value(rssi_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(rssi_bar, lv_color_make(0x20, 0x20, 0x20), LV_PART_MAIN);
@@ -892,13 +887,13 @@ lv_obj_t *zmk_display_status_screen(void) {
     lv_obj_set_style_text_font(rssi_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rssi_label, lv_color_make(0xA0, 0xA0, 0xA0), 0);
     lv_label_set_text(rssi_label, "0dBm");
-    lv_obj_set_pos(rssi_label, 167, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(rssi_label, 167, 259);  /* moved below battery bars */
 
     rate_label = lv_label_create(screen);
     lv_obj_set_style_text_font(rate_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rate_label, lv_color_make(0xA0, 0xA0, 0xA0), 0);
     lv_label_set_text(rate_label, "0.0Hz");
-    lv_obj_set_pos(rate_label, 222, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(rate_label, 222, 259);  /* moved below battery bars */
     LOG_INF("[INIT] signal status created");
 
     LOG_INF("=============================================");
@@ -1081,17 +1076,29 @@ static void destroy_layer_list_widgets(void) {
 }
 
 /* Helper to create over-max label widget */
+/* Single fixed color for the active layer name (was a different color per
+ * layer index via get_layer_color() - now always this one color). */
+#define LAYER_NAME_COLOR lv_color_make(0x4D, 0x96, 0xFF)
+
 static void create_over_max_widget(lv_obj_t *parent, int layer, int y_offset) {
     layer_over_max_label = lv_label_create(parent);
     lv_obj_set_style_text_font(layer_over_max_label, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_color(layer_over_max_label, get_layer_color(layer % 10), 0);
+    lv_obj_set_style_text_color(layer_over_max_label, LAYER_NAME_COLOR, 0);
     lv_obj_set_style_text_align(layer_over_max_label, LV_TEXT_ALIGN_CENTER, 0);
     /* Enable transform for animations */
     lv_obj_set_style_transform_pivot_x(layer_over_max_label, 30, 0);
     lv_obj_set_style_transform_pivot_y(layer_over_max_label, 14, 0);
 
+    /* Show the broadcast layer name (set by display_update_layer()) instead
+     * of the raw layer index. Falls back to the index if no name arrived
+     * yet (e.g. right after boot). */
     char text[8];
-    snprintf(text, sizeof(text), "%d", layer);
+    if (g_layer_name_text[0]) {
+        strncpy(text, g_layer_name_text, sizeof(text) - 1);
+        text[sizeof(text) - 1] = '\0';
+    } else {
+        snprintf(text, sizeof(text), "%d", layer);
+    }
     lv_label_set_text(layer_over_max_label, text);
     lv_obj_align(layer_over_max_label, LV_ALIGN_TOP_MID, 0, y_offset);
 }
@@ -1454,7 +1461,13 @@ static void update_layer_slide_display(int layer, bool animate) {
             layer, layer_slide_window_start, layer - layer_slide_window_start, scroll_slots);
 }
 
-void display_update_layer(int layer) {
+void display_update_layer(int layer, const char *layer_name) {
+    if (layer_name && layer_name[0]) {
+        strncpy(g_layer_name_text, layer_name, sizeof(g_layer_name_text) - 1);
+        g_layer_name_text[sizeof(g_layer_name_text) - 1] = '\0';
+    } else {
+        g_layer_name_text[0] = '\0';
+    }
     if (layer < 0 || layer > 255) return;
 
     int prev_layer = active_layer;
@@ -1475,7 +1488,7 @@ void display_update_layer(int layer) {
     }
 
     /* ========== Fixed Mode (original behavior) ========== */
-    bool should_be_over_max = (layer >= ds_max_layers);
+    bool should_be_over_max = true;  /* Always show the single layer-name widget */
     int layer_y = 105;  /* Y position for layer widgets */
 
     /* Determine slide direction based on layer change */
@@ -1569,7 +1582,7 @@ void display_update_connection(bool usb_rdy, bool ble_conn, bool ble_bond, int p
         /* Exclusive display: USB or BLE (not both) */
         if (usb_ready) {
             /* USB connected - show USB only */
-            snprintf(stbuf_transport, sizeof(stbuf_transport), "#ffffff USB#");
+            snprintf(stbuf_transport, sizeof(stbuf_transport), "#ffffff " LV_SYMBOL_USB " USB#");
         } else {
             /* USB not connected - show BLE with profile number on new line
              * BLE text colors:
@@ -1587,7 +1600,7 @@ void display_update_connection(bool usb_rdy, bool ble_conn, bool ble_bond, int p
                 ble_color = "ffffff";  /* White - not bonded */
             }
             snprintf(stbuf_transport, sizeof(stbuf_transport),
-                    "#%s BLE#\n#ffffff %d#", ble_color, profile);
+                    "#%s " LV_SYMBOL_BLUETOOTH " BLE#\n#ffffff %d#", ble_color, profile);
         }
         lv_label_set_text_static(transport_label, stbuf_transport);
     }
@@ -1896,7 +1909,7 @@ static void create_main_screen_widgets(void) {
     lv_obj_set_style_text_font(device_name_label, &lv_font_unscii_16, 0);
     lv_obj_set_style_text_color(device_name_label, lv_color_white(), 0);
     lv_label_set_text(device_name_label, "Scanning...");
-    lv_obj_align(device_name_label, LV_ALIGN_TOP_MID, 0, 25);
+    lv_obj_align(device_name_label, LV_ALIGN_TOP_LEFT, 10, 25);
 
     scanner_bat_icon = lv_label_create(screen_obj);
     lv_obj_set_style_text_font(scanner_bat_icon, &lv_font_montserrat_12, 0);
@@ -1936,7 +1949,7 @@ static void create_main_screen_widgets(void) {
     lv_obj_set_style_text_align(transport_label, LV_TEXT_ALIGN_RIGHT, 0);
     lv_label_set_recolor(transport_label, true);
     lv_obj_align(transport_label, LV_ALIGN_TOP_RIGHT, -10, 53);
-    lv_label_set_text(transport_label, "#ffffff BLE#\n#ffffff 0#");  /* Exclusive display */
+    lv_label_set_text(transport_label, "#ffffff " LV_SYMBOL_BLUETOOTH " BLE#\n#ffffff 0#");  /* Exclusive display */
 
     ble_profile_label = lv_label_create(screen_obj);
     lv_obj_set_style_text_font(ble_profile_label, &lv_font_montserrat_12, 0);
@@ -1944,23 +1957,18 @@ static void create_main_screen_widgets(void) {
     lv_label_set_text(ble_profile_label, "");  /* Hidden - integrated */
     lv_obj_align(ble_profile_label, LV_ALIGN_TOP_RIGHT, -8, 78);
 
-    layer_title_label = lv_label_create(screen_obj);
-    lv_obj_set_style_text_font(layer_title_label, &lv_font_montserrat_16, 0);
-    lv_obj_set_style_text_color(layer_title_label, lv_color_make(160, 160, 160), 0);
-    lv_label_set_text(layer_title_label, "Layer");
-    lv_obj_align(layer_title_label, LV_ALIGN_TOP_MID, 0, 82);  /* 3px up */
+    /* "Layer" title removed - the layer-name widget below is self-explanatory */
 
-    /* Create layer display - slide mode OR fixed mode (list/over-max) */
+    /* Always show a single centered layer-name label (never the list of all
+     * layers). Reuses the widget/animation previously only used as the
+     * "over max layers" fallback. */
     if (ds_layer_slide_mode) {
         /* Slide mode: create 7-slot dial display */
         create_layer_slide_widgets(screen_obj, 105);
         layer_mode_over_max = false;  /* Not used in slide mode */
-    } else if (active_layer >= ds_max_layers) {
+    } else {
         layer_mode_over_max = true;
         create_over_max_widget(screen_obj, active_layer, 105);
-    } else {
-        layer_mode_over_max = false;
-        create_layer_list_widgets(screen_obj, 105);
     }
 
     modifier_label = lv_label_create(screen_obj);
@@ -2035,17 +2043,17 @@ static void create_main_screen_widgets(void) {
     lv_obj_set_style_text_font(channel_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(channel_label, lv_color_make(0x80, 0x80, 0x80), 0);
     lv_label_set_text(channel_label, "Ch:0");
-    lv_obj_set_pos(channel_label, 62, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(channel_label, 62, 259);  /* moved below battery bars */
 
     rx_title_label = lv_label_create(screen_obj);
     lv_obj_set_style_text_font(rx_title_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rx_title_label, lv_color_make(0x80, 0x80, 0x80), 0);
     lv_label_set_text(rx_title_label, "RX:");
-    lv_obj_set_pos(rx_title_label, 102, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(rx_title_label, 102, 259);  /* moved below battery bars */
 
     rssi_bar = lv_bar_create(screen_obj);
     lv_obj_set_size(rssi_bar, 30, 8);
-    lv_obj_set_pos(rssi_bar, 130, 223);  /* RX indicator position */
+    lv_obj_set_pos(rssi_bar, 130, 263);  /* moved below battery bars */
     lv_bar_set_range(rssi_bar, 0, 5);
     lv_bar_set_value(rssi_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(rssi_bar, lv_color_hex(0x202020), LV_PART_MAIN);
@@ -2059,13 +2067,13 @@ static void create_main_screen_widgets(void) {
     lv_obj_set_style_text_font(rssi_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rssi_label, lv_color_make(0xA0, 0xA0, 0xA0), 0);
     lv_label_set_text(rssi_label, "--dBm");
-    lv_obj_set_pos(rssi_label, 167, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(rssi_label, 167, 259);  /* moved below battery bars */
 
     rate_label = lv_label_create(screen_obj);
     lv_obj_set_style_text_font(rate_label, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(rate_label, lv_color_make(0xA0, 0xA0, 0xA0), 0);
     lv_label_set_text(rate_label, "-.--Hz");
-    lv_obj_set_pos(rate_label, 222, 219);  /* 5px down, 5px left */
+    lv_obj_set_pos(rate_label, 222, 259);  /* moved below battery bars */
 
     LOG_INF("Main screen widgets created, restoring cached values...");
 
@@ -2074,7 +2082,7 @@ static void create_main_screen_widgets(void) {
     display_update_scanner_battery(scanner_battery);
     display_update_wpm(wpm_value);
     display_update_connection(usb_ready, ble_connected, ble_bonded, ble_profile);
-    display_update_layer(active_layer);
+    display_update_layer(active_layer, g_layer_name_text);
     display_update_modifiers(cached_modifiers);
 
     /* Force battery widget reposition based on cached values */
